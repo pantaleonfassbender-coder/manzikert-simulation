@@ -18,6 +18,18 @@ export const statusKey = (batchId: string) => `series-${batchId}-status`;
 export const cancelKey = (batchId: string) => `series-${batchId}-cancelled`;
 
 export function getGamesStore() {
+  const siteID = process.env.NETLIFY_SITE_ID || process.env.SITE_ID;
+  const token = process.env.NETLIFY_AUTH_TOKEN;
+
+  if (siteID && token) {
+    return getStore({
+      name: GAMES_STORE,
+      consistency: 'strong',
+      siteID,
+      token,
+    });
+  }
+
   return getStore({ name: GAMES_STORE, consistency: 'strong' });
 }
 
