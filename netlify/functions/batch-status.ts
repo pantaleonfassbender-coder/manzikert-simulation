@@ -1,36 +1,12 @@
 import { Handler } from '@netlify/functions';
 import {
   DEFAULT_BATCH_ID,
-  TOTAL_BACKGROUND_GAMES,
-  cancelKey,
   countCompletedGames,
   emptyStatus,
-  getGamesStore,
   readStatus,
-  statusKey,
+  resetSeries,
   writeStatus,
 } from './simulation-store';
-
-async function resetSeries(batchId: string) {
-  const store = getGamesStore();
-  const { blobs } = await store.list();
-
-  await Promise.all(
-    blobs
-      .filter(({ key }) => key.startsWith('game-') || key.startsWith('batch-') || key === cancelKey(batchId))
-      .map(({ key }) => store.delete(key))
-  );
-
-  const now = new Date().toISOString();
-  await store.setJSON(statusKey(batchId), {
-    ...emptyStatus(batchId),
-    status: 'running',
-    totalGames: TOTAL_BACKGROUND_GAMES,
-    startedAt: now,
-    updatedAt: now,
-    message: 'Simulation series started.',
-  });
-}
 
 export const handler: Handler = async (event) => {
   const batchId = DEFAULT_BATCH_ID;

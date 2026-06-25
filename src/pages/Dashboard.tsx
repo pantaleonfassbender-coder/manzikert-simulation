@@ -19,7 +19,7 @@ const INITIAL_STATE: GameState = {
 type BatchStatus = {
   totalGames: number;
   completedGames: number;
-  status: 'idle' | 'running' | 'cancelled' | 'completed';
+  status: 'idle' | 'running' | 'cancelled' | 'completed' | 'failed';
   message?: string;
 };
 

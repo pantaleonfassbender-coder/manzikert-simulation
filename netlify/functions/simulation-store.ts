@@ -8,7 +8,7 @@ export type BatchStatus = {
   batchId: string;
   totalGames: number;
   completedGames: number;
-  status: 'idle' | 'running' | 'cancelled' | 'completed';
+  status: 'idle' | 'running' | 'cancelled' | 'completed' | 'failed';
   startedAt: string | null;
   updatedAt: string | null;
   message?: string;
@@ -55,4 +55,28 @@ export async function countCompletedGames(): Promise<number> {
   const store = getGamesStore();
   const { blobs } = await store.list({ prefix: 'game-' });
   return blobs.length;
+}
+
+export async function resetSeries(batchId = DEFAULT_BATCH_ID): Promise<BatchStatus> {
+  const store = getGamesStore();
+  const { blobs } = await store.list();
+
+  await Promise.all(
+    blobs
+      .filter(({ key }) => key.startsWith('game-') || key.startsWith('batch-') || key === cancelKey(batchId))
+      .map(({ key }) => store.delete(key))
+  );
+
+  const now = new Date().toISOString();
+  const status: BatchStatus = {
+    ...emptyStatus(batchId),
+    status: 'running',
+    totalGames: TOTAL_BACKGROUND_GAMES,
+    startedAt: now,
+    updatedAt: now,
+    message: 'Simulation series queued.',
+  };
+
+  await store.setJSON(statusKey(batchId), status);
+  return status;
 }
