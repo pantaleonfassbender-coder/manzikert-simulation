@@ -1,0 +1,14 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  node_bundler = "esbuild"
+  directory = "netlify/functions"
+
+# SPA fallback: serve the app for client-side routes (e.g. /dashboard) on direct hits.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
