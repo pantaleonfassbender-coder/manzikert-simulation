@@ -1,6 +1,7 @@
 import { Handler } from '@netlify/functions';
 import {
   DEFAULT_BATCH_ID,
+  connectSimulationStore,
   countCompletedGames,
   emptyStatus,
   readStatus,
@@ -9,6 +10,8 @@ import {
 } from './simulation-store';
 
 export const handler: Handler = async (event) => {
+  connectSimulationStore(event);
+
   const batchId = DEFAULT_BATCH_ID;
 
   try {

@@ -1,5 +1,12 @@
 import { Handler } from '@netlify/functions';
-import { DEFAULT_BATCH_ID, TOTAL_BACKGROUND_GAMES, isBatchCancelled, readStatus, writeStatus } from './simulation-store';
+import {
+  DEFAULT_BATCH_ID,
+  TOTAL_BACKGROUND_GAMES,
+  connectSimulationStore,
+  isBatchCancelled,
+  readStatus,
+  writeStatus,
+} from './simulation-store';
 
 const GAMES_PER_WORKER = 3;
 const MAX_PARALLEL_LAUNCHES = 3;
@@ -80,6 +87,8 @@ function getLaunchJobs(totalGames: number) {
 }
 
 export const handler: Handler = async (event) => {
+  connectSimulationStore(event);
+
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }

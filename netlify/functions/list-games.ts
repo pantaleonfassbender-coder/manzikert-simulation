@@ -1,7 +1,9 @@
 import { Handler } from '@netlify/functions';
-import { getGamesStore } from './simulation-store';
+import { connectSimulationStore, getGamesStore } from './simulation-store';
 
-export const handler: Handler = async () => {
+export const handler: Handler = async (event) => {
+  connectSimulationStore(event);
+
   try {
     const gamesStore = getGamesStore();
     const { blobs } = await gamesStore.list({ prefix: 'game-' });

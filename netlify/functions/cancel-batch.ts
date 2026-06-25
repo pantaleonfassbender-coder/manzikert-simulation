@@ -1,7 +1,16 @@
 import { Handler } from '@netlify/functions';
-import { DEFAULT_BATCH_ID, cancelKey, getGamesStore, readStatus, writeStatus } from './simulation-store';
+import {
+  DEFAULT_BATCH_ID,
+  cancelKey,
+  connectSimulationStore,
+  getGamesStore,
+  readStatus,
+  writeStatus,
+} from './simulation-store';
 
 export const handler: Handler = async (event) => {
+  connectSimulationStore(event);
+
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }

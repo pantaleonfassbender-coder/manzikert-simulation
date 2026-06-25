@@ -1,5 +1,5 @@
 import { Handler } from '@netlify/functions';
-import { DEFAULT_BATCH_ID, TOTAL_BACKGROUND_GAMES, resetSeries, writeStatus } from './simulation-store';
+import { DEFAULT_BATCH_ID, TOTAL_BACKGROUND_GAMES, connectSimulationStore, resetSeries, writeStatus } from './simulation-store';
 
 type HandlerEvent = Parameters<Handler>[0];
 
@@ -55,6 +55,8 @@ async function launchDispatcher(baseUrl: string) {
 }
 
 export const handler: Handler = async (event) => {
+  connectSimulationStore(event);
+
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }

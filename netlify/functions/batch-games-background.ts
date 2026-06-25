@@ -3,7 +3,14 @@ import { ActionAllocation, Faction, ModelProvider } from '../../src/engine/types
 import { createInitialState, resolveRound } from '../../src/engine/engine';
 import { generatePrompt } from '../../src/engine/prompts';
 import { callLLM } from '../../src/engine/llmClients';
-import { countCompletedGames, getGamesStore, isBatchCancelled, readStatus, writeStatus } from './simulation-store';
+import {
+  connectSimulationStore,
+  countCompletedGames,
+  getGamesStore,
+  isBatchCancelled,
+  readStatus,
+  writeStatus,
+} from './simulation-store';
 
 // Helper to delay
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
@@ -49,6 +56,8 @@ async function getFactionAction(provider: ModelProvider, prompt: string, faction
 }
 
 export const handler: Handler = async (event) => {
+  connectSimulationStore(event);
+
   if (event.httpMethod !== 'POST') {
     return { statusCode: 405, body: 'Method Not Allowed' };
   }

@@ -1,4 +1,4 @@
-import { getStore } from '@netlify/blobs';
+import { connectLambda, getStore } from '@netlify/blobs';
 
 export const GAMES_STORE = 'mantzikert-games';
 export const DEFAULT_BATCH_ID = 'main';
@@ -16,6 +16,14 @@ export type BatchStatus = {
 
 export const statusKey = (batchId: string) => `series-${batchId}-status`;
 export const cancelKey = (batchId: string) => `series-${batchId}-cancelled`;
+
+export function connectSimulationStore(event: unknown): void {
+  const lambdaEvent = event as { blobs?: string; headers?: Record<string, string> };
+
+  if (lambdaEvent?.blobs) {
+    connectLambda(lambdaEvent as { blobs: string; headers: Record<string, string> });
+  }
+}
 
 export function getGamesStore() {
   const siteID = process.env.NETLIFY_SITE_ID || process.env.SITE_ID;
