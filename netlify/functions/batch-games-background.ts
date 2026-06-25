@@ -1,5 +1,5 @@
 import { Handler } from '@netlify/functions';
-import { getStore } from '@netlify/blobs';
+import { connectLambda, getStore } from '@netlify/blobs';
 import { Faction } from '../../src/engine/types';
 import { createInitialState, resolveRound } from '../../src/engine/engine';
 import { generatePrompt } from '../../src/engine/prompts';
@@ -10,13 +10,18 @@ const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 
 export const handler: Handler = async (event) => {
   try {
+    connectLambda(event);
+
     const { batchId, startIndex, count }: { batchId: string, startIndex: number, count: number } = JSON.parse(event.body || '{}');
 
     if (!batchId) {
       return { statusCode: 400, body: 'Missing batchId' };
     }
 
-    const gamesStore = getStore('mantzikert-games');
+    const gamesStore = getStore({
+      name: 'mantzikert-games',
+      consistency: 'eventual',
+    });
     const results = [];
 
     for (let i = 0; i < count; i++) {
