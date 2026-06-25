@@ -97,6 +97,16 @@ h1, h2, h3 {
   box-shadow: 0 6px 20px rgba(59, 130, 246, 0.23);
 }
 
+.btn-danger {
+  background: #be123c;
+  color: white;
+}
+
+.btn-danger:hover {
+  background: #9f1239;
+  transform: translateY(-1px);
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;

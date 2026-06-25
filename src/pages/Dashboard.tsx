@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Download, FastForward, Play } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Download, FastForward, Play, StopCircle } from 'lucide-react';
 import type { GameState, GameConfig } from '../engine/types';
 import { exportToExcel } from '../utils/exportExcel';
 import { MODEL_NAMES } from '../engine/models';
@@ -16,16 +16,46 @@ const INITIAL_STATE: GameState = {
   winner: null,
 };
 
+type BatchStatus = {
+  totalGames: number;
+  completedGames: number;
+  status: 'idle' | 'running' | 'cancelled' | 'completed';
+  message?: string;
+};
+
 const Dashboard: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [backgroundProgress, setBackgroundProgress] = useState(0);
+  const [batchStatus, setBatchStatus] = useState<BatchStatus>({
+    totalGames: 299,
+    completedGames: 0,
+    status: 'idle',
+  });
+  const [isStartingBatch, setIsStartingBatch] = useState(false);
+  const [isCancellingBatch, setIsCancellingBatch] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
   const config: GameConfig = {
     gameId: 'game-spectator',
     roles: { emperor: 'openai', foes: 'gemini', seljuks: 'claude' }
   };
+
+  const refreshBatchStatus = async () => {
+    try {
+      const res = await fetch('/.netlify/functions/batch-status');
+      if (!res.ok) return;
+      const status = await res.json();
+      setBatchStatus(status);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    refreshBatchStatus();
+    const interval = window.setInterval(refreshBatchStatus, 5000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const playNextRound = async () => {
     if (gameState.currentRound > 12 || isPlaying) return;
@@ -57,32 +87,39 @@ const Dashboard: React.FC = () => {
   };
 
   const startBackgroundBatch = async () => {
-    const totalGames = 299;
-    const batchSize = 10;
-    const numBatches = Math.ceil(totalGames / batchSize);
-    
-    // We fire and forget them in chunks to Netlify background functions
-    // Note: Netlify free tier might rate limit concurrent background functions,
-    // so we will just fire them off. In a real production system we'd use a queue.
-    for (let i = 0; i < numBatches; i++) {
-      const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
-      const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
-      fetch('/.netlify/functions/batch-games-background', {
-        method: 'POST',
-        body: JSON.stringify({ batchId: 'main', startIndex, count })
-      }).catch(console.error);
+    if (isStartingBatch || batchStatus.status === 'running') return;
+    setIsStartingBatch(true);
+
+    try {
+      const startRes = await fetch('/.netlify/functions/start-batch', { method: 'POST' });
+      if (!startRes.ok) {
+        throw new Error(`Batch start failed with status ${startRes.status}`);
+      }
+      const status = await startRes.json();
+      setBatchStatus(status);
+    } catch (e) {
+      console.error(e);
+      alert('Failed to start background simulation');
+    } finally {
+      setIsStartingBatch(false);
     }
-    
-    alert('Started 299 games in the background. Check back in a few minutes to download results.');
-    
-    // Mock progress bar
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 5;
-      setBackgroundProgress(Math.min(prog, 100));
-      if (prog >= 100) clearInterval(interval);
-    }, 10000);
+    refreshBatchStatus();
+  };
+
+  const cancelBackgroundBatch = async () => {
+    setIsCancellingBatch(true);
+    try {
+      const res = await fetch('/.netlify/functions/cancel-batch', { method: 'POST' });
+      if (!res.ok) {
+        throw new Error(`Batch cancellation failed with status ${res.status}`);
+      }
+      await refreshBatchStatus();
+    } catch (e) {
+      console.error(e);
+      alert('Failed to cancel background simulation');
+    } finally {
+      setIsCancellingBatch(false);
+    }
   };
 
   const handleDownload = async () => {
@@ -90,6 +127,9 @@ const Dashboard: React.FC = () => {
     try {
       const res = await fetch('/.netlify/functions/list-games');
       const data = await res.json();
+      if (data.warning) {
+        alert(data.warning);
+      }
       
       // Merge spectator game with background games
       const allGames = [{ gameId: 'game-0', roles: config.roles, finalState: gameState }, ...(data.games || [])];
@@ -100,6 +140,11 @@ const Dashboard: React.FC = () => {
     }
     setDownloading(false);
   };
+
+  const progressPercent = batchStatus.totalGames > 0
+    ? Math.round((batchStatus.completedGames / batchStatus.totalGames) * 100)
+    : 0;
+  const batchIsRunning = batchStatus.status === 'running';
 
   return (
     <div>
@@ -185,10 +230,15 @@ const Dashboard: React.FC = () => {
         <h2>Batch Processing</h2>
         <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the remaining 299 games in the background and export all data to Excel.</p>
         
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          <button className="btn btn-primary" onClick={startBackgroundBatch}>
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+          <button className="btn btn-primary" onClick={startBackgroundBatch} disabled={isStartingBatch || batchIsRunning}>
             <FastForward size={18} style={{ marginRight: '0.5rem' }} /> 
-            Start 299 Background Games
+            {isStartingBatch ? 'Starting...' : 'Start 299 Background Games'}
+          </button>
+
+          <button className="btn btn-danger" onClick={cancelBackgroundBatch} disabled={!batchIsRunning || isCancellingBatch}>
+            <StopCircle size={18} style={{ marginRight: '0.5rem' }} />
+            {isCancellingBatch ? 'Cancelling...' : 'Cancel Progress'}
           </button>
 
           <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={handleDownload} disabled={downloading}>
@@ -197,11 +247,14 @@ const Dashboard: React.FC = () => {
           </button>
         </div>
 
-        {backgroundProgress > 0 && (
-           <div style={{ marginTop: '1.5rem' }}>
-             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Background jobs initiated...</p>
+        {batchStatus.status !== 'idle' && (
+           <div style={{ marginTop: '1.5rem' }} aria-live="polite">
+             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+               <span>{batchStatus.message || `Simulation series is ${batchStatus.status}.`}</span>
+               <span>{batchStatus.completedGames} / {batchStatus.totalGames} games ({progressPercent}%)</span>
+             </div>
              <div className="progress-bar">
-               <div className="progress-fill" style={{ width: `${backgroundProgress}%` }}></div>
+               <div className="progress-fill" style={{ width: `${progressPercent}%` }}></div>
              </div>
            </div>
         )}
