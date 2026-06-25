@@ -1,16 +1,16 @@
 import { Handler } from '@netlify/functions';
-import { getStore } from '@netlify/blobs';
+import { getGamesStore } from './simulation-store';
 
 export const handler: Handler = async () => {
   try {
-    const gamesStore = getStore('mantzikert-games');
-    const { blobs } = await gamesStore.list();
+    const gamesStore = getGamesStore();
+    const { blobs } = await gamesStore.list({ prefix: 'game-' });
     
     // Fetch all game data
     const games = await Promise.all(
       blobs
-        .filter(b => b.key.startsWith('game-'))
-        .map(async (b) => await gamesStore.getJSON(b.key))
+        .sort((a, b) => Number(a.key.replace('game-', '')) - Number(b.key.replace('game-', '')))
+        .map(async (b) => await gamesStore.get(b.key, { type: 'json' }))
     );
 
     return {
@@ -20,6 +20,13 @@ export const handler: Handler = async () => {
     };
   } catch (error: any) {
     console.error('List games error:', error);
-    return { statusCode: 500, body: error.message };
+    return {
+      statusCode: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        games: [],
+        warning: 'Simulation storage is not available yet. Try again from the deployed Netlify site.',
+      }),
+    };
   }
 };
