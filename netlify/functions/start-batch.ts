@@ -1,9 +1,41 @@
 import { Handler } from '@netlify/functions';
 import { DEFAULT_BATCH_ID, TOTAL_BACKGROUND_GAMES, resetSeries, writeStatus } from './simulation-store';
 
-function getFunctionBaseUrl(event: Parameters<Handler>[0]) {
-  const url = new URL(event.rawUrl);
-  return `${url.origin}/.netlify/functions`;
+type HandlerEvent = Parameters<Handler>[0];
+
+function getHeader(event: HandlerEvent, name: string) {
+  const lowerName = name.toLowerCase();
+  return Object.entries(event.headers || {}).find(([key]) => key.toLowerCase() === lowerName)?.[1];
+}
+
+function normalizeOrigin(value: string | undefined) {
+  if (!value) return null;
+
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function getFunctionBaseUrl(event: HandlerEvent) {
+  const requestOrigin = normalizeOrigin(event.rawUrl);
+  if (requestOrigin) {
+    return `${requestOrigin}/.netlify/functions`;
+  }
+
+  const deployOrigin = normalizeOrigin(process.env.DEPLOY_PRIME_URL || process.env.DEPLOY_URL || process.env.URL);
+  if (deployOrigin) {
+    return `${deployOrigin}/.netlify/functions`;
+  }
+
+  const host = getHeader(event, 'x-forwarded-host') || getHeader(event, 'host');
+  if (host) {
+    const protocol = getHeader(event, 'x-forwarded-proto') || 'https';
+    return `${protocol}://${host}/.netlify/functions`;
+  }
+
+  throw new Error('Could not determine the Netlify Functions URL for background dispatch.');
 }
 
 async function launchDispatcher(baseUrl: string) {

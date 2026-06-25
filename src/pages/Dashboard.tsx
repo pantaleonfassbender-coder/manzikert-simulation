@@ -93,13 +93,14 @@ const Dashboard: React.FC = () => {
     try {
       const startRes = await fetch('/.netlify/functions/start-batch', { method: 'POST' });
       if (!startRes.ok) {
-        throw new Error(`Batch start failed with status ${startRes.status}`);
+        const body = await startRes.json().catch(() => null);
+        throw new Error(body?.error || `Batch start failed with status ${startRes.status}`);
       }
       const status = await startRes.json();
       setBatchStatus(status);
     } catch (e) {
       console.error(e);
-      alert('Failed to start background simulation');
+      alert(e instanceof Error ? e.message : 'Failed to start background simulation');
     } finally {
       setIsStartingBatch(false);
     }
