@@ -73,5 +73,5 @@ export function exportToExcel(games: any[]) {
   const ws3 = XLSX.utils.json_to_sheet(selfAssessments);
   XLSX.utils.book_append_sheet(wb, ws3, "Self Assessments");
 
-  XLSX.writeFile(wb, "Mantzikert_Simulation_Results.xlsx");
+  XLSX.writeFile(wb, "Manzikert_Simulation_Results.xlsx");
 }

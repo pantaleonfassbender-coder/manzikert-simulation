@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Download, FastForward, Play, RotateCcw, Zap } from 'lucide-react';
+import { Download, FastForward, Pause, Play, RotateCcw, Zap } from 'lucide-react';
 import type { GameState, GameConfig } from '../engine/types';
 import { exportToExcel } from '../utils/exportExcel';
 import { MODEL_NAMES } from '../engine/models';
 
 const TOTAL_BACKGROUND_GAMES = 300;
 const BACKGROUND_CHUNK_SIZE = 10;
+const TOTAL_BATCHES = Math.ceil(TOTAL_BACKGROUND_GAMES / BACKGROUND_CHUNK_SIZE);
 
 const INITIAL_STATE: GameState = {
   gameId: 'game-spectator',
@@ -25,6 +26,7 @@ const Dashboard: React.FC = () => {
   const [downloading, setDownloading] = useState(false);
   const [batchStarted, setBatchStarted] = useState(false);
   const [storedCount, setStoredCount] = useState(0);
+  const [paused, setPaused] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // The spectator demo is a standalone showcase. It uses a fixed role line-up
@@ -98,6 +100,8 @@ const Dashboard: React.FC = () => {
       const data = await res.json();
       const count = (data.games || []).filter((g: any) => g && g.finalState).length;
       setStoredCount(count);
+      setPaused(!!data.paused);
+      // Stop polling once everything is stored or the run is paused and idle.
       if (count >= TOTAL_BACKGROUND_GAMES && pollRef.current) {
         clearInterval(pollRef.current);
         pollRef.current = null;
@@ -107,30 +111,72 @@ const Dashboard: React.FC = () => {
     }
   };
 
-  const startBackgroundBatch = async () => {
-    // Fire a single chained run. The background function plays games in
-    // consecutive batches of BACKGROUND_CHUNK_SIZE and queues the next batch
-    // itself, so batches never run all at once.
-    try {
-      await fetch('/.netlify/functions/batch-games-background', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startIndex: 0, chunkSize: BACKGROUND_CHUNK_SIZE, total: TOTAL_BACKGROUND_GAMES })
-      });
-    } catch (e) {
-      console.error(e);
-    }
-
-    setBatchStarted(true);
-    alert(`Started ${TOTAL_BACKGROUND_GAMES} games in consecutive batches of ${BACKGROUND_CHUNK_SIZE}. Results accumulate in storage — download any time to get whatever has finished.`);
-
-    refreshStoredCount();
+  const ensurePolling = () => {
     if (!pollRef.current) {
       pollRef.current = setInterval(refreshStoredCount, 15000);
     }
   };
 
-  // Stop polling when leaving the page.
+  // Set the server-side pause flag. The background run honours it at the next
+  // batch boundary.
+  const setPauseFlag = async (value: boolean) => {
+    await fetch('/.netlify/functions/set-run-control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused: value })
+    });
+  };
+
+  // Fire one chained run starting at the given (chunk-aligned) game index. The
+  // background function plays games in consecutive batches of
+  // BACKGROUND_CHUNK_SIZE and queues the next batch itself, skipping any game
+  // already stored — so this is safe to call to start, resume, or restart.
+  const launchRun = async (startIndex: number) => {
+    await setPauseFlag(false);
+    setPaused(false);
+    try {
+      await fetch('/.netlify/functions/batch-games-background', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startIndex, chunkSize: BACKGROUND_CHUNK_SIZE, total: TOTAL_BACKGROUND_GAMES })
+      });
+    } catch (e) {
+      console.error(e);
+    }
+    setBatchStarted(true);
+    refreshStoredCount();
+    ensurePolling();
+  };
+
+  const startBackgroundRun = async () => {
+    await launchRun(0);
+    alert(`Started ${TOTAL_BACKGROUND_GAMES} games in ${TOTAL_BATCHES} consecutive batches of ${BACKGROUND_CHUNK_SIZE}. You can pause after the current batch, resume later, and download intermediate results any time.`);
+  };
+
+  // Resume from the next unfinished batch boundary. Games already stored are
+  // skipped server-side, so aligning to the chunk boundary is safe.
+  const resumeBackgroundRun = async () => {
+    const alignedStart = Math.floor(storedCount / BACKGROUND_CHUNK_SIZE) * BACKGROUND_CHUNK_SIZE;
+    await launchRun(alignedStart);
+  };
+
+  // Ask the run to stop after the current batch finishes.
+  const pauseBackgroundRun = async () => {
+    try {
+      await setPauseFlag(true);
+      setPaused(true);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // On mount, read current progress/pause state once, and resume live polling
+  // if a run is already underway. Stop polling when leaving the page.
+  useEffect(() => {
+    refreshStoredCount();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current);
   }, []);
@@ -148,6 +194,10 @@ const Dashboard: React.FC = () => {
     }
     setDownloading(false);
   };
+
+  // Derived run status for the indicator and button states.
+  const runComplete = storedCount >= TOTAL_BACKGROUND_GAMES;
+  const running = batchStarted && !paused && !runComplete;
 
   return (
     <div>
@@ -216,16 +266,14 @@ const Dashboard: React.FC = () => {
               {isPlaying ? 'Computing...' : <><Play size={18} style={{ marginRight: '0.5rem' }} /> Play Next Round</>}
             </button>
             <button
-              className="btn"
-              style={{ background: 'rgba(255,255,255,0.1)' }}
+              className="btn btn-secondary"
               onClick={playFullDemo}
               disabled={isPlaying || gameState.currentRound > 12}
             >
               <Zap size={18} style={{ marginRight: '0.5rem' }} /> Auto-Play Full Game
             </button>
             <button
-              className="btn"
-              style={{ background: 'rgba(255,255,255,0.1)' }}
+              className="btn btn-secondary"
               onClick={resetDemo}
               disabled={isPlaying}
             >
@@ -248,35 +296,75 @@ const Dashboard: React.FC = () => {
       </div>
 
       <div className="glass-panel" style={{ marginTop: '2rem' }}>
-        <h2>Background Run</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+          <h2 style={{ margin: 0 }}>Background Run</h2>
+          <span className={`status-badge ${
+            runComplete ? 'is-complete' : paused ? 'is-paused' : running ? 'is-running' : 'is-idle'
+          }`}>
+            {runComplete ? 'Complete' : paused ? 'Paused' : running ? 'Running' : 'Idle'}
+          </span>
+        </div>
         <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
-          Runs {TOTAL_BACKGROUND_GAMES} games in consecutive batches of {BACKGROUND_CHUNK_SIZE}. Each finished game is
-          saved immediately, so the Excel file grows over time — download whenever you like to capture whatever has
-          completed so far. This run is independent of the spectator demo above.
+          Runs {TOTAL_BACKGROUND_GAMES} games in {TOTAL_BATCHES} consecutive batches of {BACKGROUND_CHUNK_SIZE}. Each
+          finished game is saved immediately, so you can pause after the current batch, resume later, and download the
+          intermediate results at any point. This run is independent of the spectator demo above.
         </p>
 
         <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-          <button className="btn btn-primary" onClick={startBackgroundBatch}>
+          <button
+            className="btn btn-primary"
+            onClick={startBackgroundRun}
+            disabled={running || (storedCount > 0 && !runComplete && paused)}
+            title="Begin the full 300-game run from the start"
+          >
             <FastForward size={18} style={{ marginRight: '0.5rem' }} />
-            Start {TOTAL_BACKGROUND_GAMES} Background Games
+            {storedCount > 0 ? `Restart ${TOTAL_BACKGROUND_GAMES} Games` : `Start ${TOTAL_BACKGROUND_GAMES} Background Games`}
           </button>
 
-          <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={refreshStoredCount}>
+          {paused && !runComplete && storedCount > 0 && (
+            <button className="btn btn-primary" onClick={resumeBackgroundRun} title="Continue from the next batch">
+              <Play size={18} style={{ marginRight: '0.5rem' }} />
+              Resume Run
+            </button>
+          )}
+
+          <button
+            className="btn btn-warning"
+            onClick={pauseBackgroundRun}
+            disabled={!running || paused || runComplete}
+            title="Stop the run after the current batch finishes"
+          >
+            <Pause size={18} style={{ marginRight: '0.5rem' }} />
+            Pause After Current Batch
+          </button>
+
+          <button className="btn btn-secondary" onClick={refreshStoredCount}>
             <RotateCcw size={18} style={{ marginRight: '0.5rem' }} />
             Refresh Status
           </button>
 
-          <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={handleDownload} disabled={downloading}>
+          <button className="btn btn-secondary" onClick={handleDownload} disabled={downloading}>
             <Download size={18} style={{ marginRight: '0.5rem' }} />
-            {downloading ? 'Preparing Excel...' : 'Download Results'}
+            {downloading ? 'Preparing Excel...' : 'Download Intermediate Results'}
           </button>
         </div>
 
+        {paused && !runComplete && (
+          <p style={{ marginTop: '1rem', fontSize: '0.85rem', color: '#fde68a' }}>
+            The run pauses once the in-flight batch finishes. Press <strong>Resume Run</strong> to continue from the next batch.
+          </p>
+        )}
+
         {(batchStarted || storedCount > 0) && (
            <div style={{ marginTop: '1.5rem' }}>
-             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-               {storedCount} / {TOTAL_BACKGROUND_GAMES} games stored
-             </p>
+             <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', fontSize: '0.9rem' }}>
+               <span style={{ fontWeight: 600 }}>
+                 Batch {Math.min(Math.floor(storedCount / BACKGROUND_CHUNK_SIZE) + (runComplete ? 0 : 1), TOTAL_BATCHES)} of {TOTAL_BATCHES}
+               </span>
+               <span style={{ color: 'var(--text-secondary)' }}>
+                 Game {storedCount} / {TOTAL_BACKGROUND_GAMES} stored
+               </span>
+             </div>
              <div className="progress-bar">
                <div className="progress-fill" style={{ width: `${Math.min(100, (storedCount / TOTAL_BACKGROUND_GAMES) * 100)}%` }}></div>
              </div>

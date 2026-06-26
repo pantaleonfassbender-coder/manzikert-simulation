@@ -12,6 +12,21 @@ const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
 const TOTAL_GAMES = 300;
 const DEFAULT_CHUNK = 10;
 
+// Key holding the user-controlled pause flag. When paused, the chain stops
+// after the current batch finishes instead of queueing the next one.
+const CONTROL_KEY = 'run-control';
+
+async function isPaused(): Promise<boolean> {
+  try {
+    const store = getStore({ name: 'mantzikert-games', consistency: 'strong' });
+    const control = (await store.get(CONTROL_KEY, { type: 'json' })) as { paused?: boolean } | null;
+    return !!control?.paused;
+  } catch {
+    // If the flag can't be read, default to continuing the run.
+    return false;
+  }
+}
+
 // Model roles rotate every 100 games so each provider plays every faction once
 // across the run. Roles are derived purely from the absolute game index, so the
 // rotation is identical no matter how the run is split into batches.
@@ -81,8 +96,13 @@ export const handler: Handler = async (event) => {
       await gamesStore.setJSON(gameId, result);
     }
 
-    // Chain the next consecutive batch once this chunk's games are stored.
+    // Chain the next consecutive batch once this chunk's games are stored —
+    // unless the user has asked to pause, in which case the run stops cleanly
+    // at this batch boundary and can be resumed later from where it left off.
     if (end < total) {
+      if (await isPaused()) {
+        return { statusCode: 200, body: `Paused after games ${startIndex}..${end - 1} of ${total}` };
+      }
       const url = selfInvokeUrl(event);
       if (url) {
         await fetch(url, {
