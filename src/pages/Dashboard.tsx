@@ -1,8 +1,11 @@
-import React, { useState } from 'react';
-import { Download, FastForward, Play } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Download, FastForward, Play, RotateCcw, Zap } from 'lucide-react';
 import type { GameState, GameConfig } from '../engine/types';
 import { exportToExcel } from '../utils/exportExcel';
 import { MODEL_NAMES } from '../engine/models';
+
+const TOTAL_BACKGROUND_GAMES = 300;
+const BACKGROUND_CHUNK_SIZE = 10;
 
 const INITIAL_STATE: GameState = {
   gameId: 'game-spectator',
@@ -19,35 +22,43 @@ const INITIAL_STATE: GameState = {
 const Dashboard: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [backgroundProgress, setBackgroundProgress] = useState(0);
   const [downloading, setDownloading] = useState(false);
+  const [batchStarted, setBatchStarted] = useState(false);
+  const [storedCount, setStoredCount] = useState(0);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // The spectator demo is a standalone showcase. It uses a fixed role line-up
+  // and never touches the background run or the stored results.
   const config: GameConfig = {
     gameId: 'game-spectator',
     roles: { emperor: 'openai', foes: 'gemini', seljuks: 'claude' }
   };
 
+  // Play a single round against the server and return the resulting state.
+  const runRound = async (current: GameState): Promise<GameState | null> => {
+    const res = await fetch('/.netlify/functions/play-round', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: current, config })
+    });
+
+    if (!res.ok) {
+      throw new Error(`Round request failed with status ${res.status}`);
+    }
+
+    const data = await res.json();
+    if (!data.nextState) {
+      throw new Error('Round response did not include a next game state');
+    }
+    return data.nextState as GameState;
+  };
+
   const playNextRound = async () => {
     if (gameState.currentRound > 12 || isPlaying) return;
     setIsPlaying(true);
-
     try {
-      const res = await fetch('/.netlify/functions/play-round', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: gameState, config })
-      });
-
-      if (!res.ok) {
-        throw new Error(`Round request failed with status ${res.status}`);
-      }
-
-      const data = await res.json();
-      if (data.nextState) {
-        setGameState(data.nextState);
-      } else {
-        throw new Error('Round response did not include a next game state');
-      }
+      const next = await runRound(gameState);
+      if (next) setGameState(next);
     } catch (e) {
       console.error(e);
       alert('Error playing round');
@@ -56,44 +67,81 @@ const Dashboard: React.FC = () => {
     }
   };
 
-  const startBackgroundBatch = async () => {
-    const totalGames = 299;
-    const batchSize = 10;
-    const numBatches = Math.ceil(totalGames / batchSize);
-    
-    // We fire and forget them in chunks to Netlify background functions
-    // Note: Netlify free tier might rate limit concurrent background functions,
-    // so we will just fire them off. In a real production system we'd use a queue.
-    for (let i = 0; i < numBatches; i++) {
-      const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
-      const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
-      fetch('/.netlify/functions/batch-games-background', {
-        method: 'POST',
-        body: JSON.stringify({ batchId: 'main', startIndex, count })
-      }).catch(console.error);
+  // Run the spectator game to completion, refreshing the view after each round.
+  const playFullDemo = async () => {
+    if (gameState.currentRound > 12 || isPlaying) return;
+    setIsPlaying(true);
+    try {
+      let current = gameState;
+      while (current.currentRound <= 12) {
+        const next = await runRound(current);
+        if (!next) break;
+        current = next;
+        setGameState(next);
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Error playing full demo game');
+    } finally {
+      setIsPlaying(false);
     }
-    
-    alert('Started 299 games in the background. Check back in a few minutes to download results.');
-    
-    // Mock progress bar
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 5;
-      setBackgroundProgress(Math.min(prog, 100));
-      if (prog >= 100) clearInterval(interval);
-    }, 10000);
   };
+
+  const resetDemo = () => {
+    if (isPlaying) return;
+    setGameState(INITIAL_STATE);
+  };
+
+  const refreshStoredCount = async () => {
+    try {
+      const res = await fetch('/.netlify/functions/list-games');
+      const data = await res.json();
+      const count = (data.games || []).filter((g: any) => g && g.finalState).length;
+      setStoredCount(count);
+      if (count >= TOTAL_BACKGROUND_GAMES && pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    } catch (e) {
+      console.error('Failed to read stored games', e);
+    }
+  };
+
+  const startBackgroundBatch = async () => {
+    // Fire a single chained run. The background function plays games in
+    // consecutive batches of BACKGROUND_CHUNK_SIZE and queues the next batch
+    // itself, so batches never run all at once.
+    try {
+      await fetch('/.netlify/functions/batch-games-background', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startIndex: 0, chunkSize: BACKGROUND_CHUNK_SIZE, total: TOTAL_BACKGROUND_GAMES })
+      });
+    } catch (e) {
+      console.error(e);
+    }
+
+    setBatchStarted(true);
+    alert(`Started ${TOTAL_BACKGROUND_GAMES} games in consecutive batches of ${BACKGROUND_CHUNK_SIZE}. Results accumulate in storage — download any time to get whatever has finished.`);
+
+    refreshStoredCount();
+    if (!pollRef.current) {
+      pollRef.current = setInterval(refreshStoredCount, 15000);
+    }
+  };
+
+  // Stop polling when leaving the page.
+  useEffect(() => () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+  }, []);
 
   const handleDownload = async () => {
     setDownloading(true);
     try {
       const res = await fetch('/.netlify/functions/list-games');
       const data = await res.json();
-      
-      // Merge spectator game with background games
-      const allGames = [{ gameId: 'game-0', roles: config.roles, finalState: gameState }, ...(data.games || [])];
-      exportToExcel(allGames);
+      // Export only the stored background games — the spectator demo is separate.
+      exportToExcel(data.games || []);
     } catch (e) {
       console.error(e);
       alert('Failed to download excel');
@@ -105,7 +153,7 @@ const Dashboard: React.FC = () => {
     <div>
       <div className="header" style={{ marginBottom: '2rem' }}>
         <h1>Live Simulation Monitor</h1>
-        <p>Spectator Game (1 of 300)</p>
+        <p>Spectator Demo — a standalone showcase game, separate from the background run</p>
       </div>
 
       <div className="grid grid-cols-3">
@@ -159,13 +207,31 @@ const Dashboard: React.FC = () => {
             <h2>Round {Math.min(gameState.currentRound, 12)} / 12</h2>
             {gameState.winner && <p style={{ color: 'var(--accent-color)', fontWeight: 'bold' }}>Winner: {gameState.winner.toUpperCase()}</p>}
           </div>
-          <button 
-            className="btn btn-primary"
-            onClick={playNextRound}
-            disabled={isPlaying || gameState.currentRound > 12}
-          >
-            {isPlaying ? 'Computing...' : <><Play size={18} style={{ marginRight: '0.5rem' }} /> Play Next Round</>}
-          </button>
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button
+              className="btn btn-primary"
+              onClick={playNextRound}
+              disabled={isPlaying || gameState.currentRound > 12}
+            >
+              {isPlaying ? 'Computing...' : <><Play size={18} style={{ marginRight: '0.5rem' }} /> Play Next Round</>}
+            </button>
+            <button
+              className="btn"
+              style={{ background: 'rgba(255,255,255,0.1)' }}
+              onClick={playFullDemo}
+              disabled={isPlaying || gameState.currentRound > 12}
+            >
+              <Zap size={18} style={{ marginRight: '0.5rem' }} /> Auto-Play Full Game
+            </button>
+            <button
+              className="btn"
+              style={{ background: 'rgba(255,255,255,0.1)' }}
+              onClick={resetDemo}
+              disabled={isPlaying}
+            >
+              <RotateCcw size={18} style={{ marginRight: '0.5rem' }} /> Reset
+            </button>
+          </div>
         </div>
 
         <div style={{ marginTop: '1.5rem', maxHeight: '200px', overflowY: 'auto', background: 'rgba(0,0,0,0.3)', padding: '1rem', borderRadius: '8px' }}>
@@ -182,26 +248,37 @@ const Dashboard: React.FC = () => {
       </div>
 
       <div className="glass-panel" style={{ marginTop: '2rem' }}>
-        <h2>Batch Processing</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the remaining 299 games in the background and export all data to Excel.</p>
-        
-        <div style={{ display: 'flex', gap: '1rem' }}>
+        <h2>Background Run</h2>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+          Runs {TOTAL_BACKGROUND_GAMES} games in consecutive batches of {BACKGROUND_CHUNK_SIZE}. Each finished game is
+          saved immediately, so the Excel file grows over time — download whenever you like to capture whatever has
+          completed so far. This run is independent of the spectator demo above.
+        </p>
+
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
           <button className="btn btn-primary" onClick={startBackgroundBatch}>
-            <FastForward size={18} style={{ marginRight: '0.5rem' }} /> 
-            Start 299 Background Games
+            <FastForward size={18} style={{ marginRight: '0.5rem' }} />
+            Start {TOTAL_BACKGROUND_GAMES} Background Games
+          </button>
+
+          <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={refreshStoredCount}>
+            <RotateCcw size={18} style={{ marginRight: '0.5rem' }} />
+            Refresh Status
           </button>
 
           <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={handleDownload} disabled={downloading}>
-            <Download size={18} style={{ marginRight: '0.5rem' }} /> 
+            <Download size={18} style={{ marginRight: '0.5rem' }} />
             {downloading ? 'Preparing Excel...' : 'Download Results'}
           </button>
         </div>
 
-        {backgroundProgress > 0 && (
+        {(batchStarted || storedCount > 0) && (
            <div style={{ marginTop: '1.5rem' }}>
-             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Background jobs initiated...</p>
+             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+               {storedCount} / {TOTAL_BACKGROUND_GAMES} games stored
+             </p>
              <div className="progress-bar">
-               <div className="progress-fill" style={{ width: `${backgroundProgress}%` }}></div>
+               <div className="progress-fill" style={{ width: `${Math.min(100, (storedCount / TOTAL_BACKGROUND_GAMES) * 100)}%` }}></div>
              </div>
            </div>
         )}

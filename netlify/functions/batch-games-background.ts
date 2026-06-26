@@ -1,79 +1,101 @@
 import { Handler } from '@netlify/functions';
 import { getStore } from '@netlify/blobs';
-import { Faction } from '../../src/engine/types';
+import { Faction, ModelProvider } from '../../src/engine/types';
 import { createInitialState, resolveRound } from '../../src/engine/engine';
 import { generatePrompt } from '../../src/engine/prompts';
-import { callLLM } from '../../src/engine/llmClients';
+import { getFactionAction } from '../../src/engine/fallbacks';
 
-// Helper to delay
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+// The background run is fully independent of the in-browser spectator demo.
+// It plays game-0 .. game-(TOTAL_GAMES-1) and stores each one in Blobs.
+const TOTAL_GAMES = 300;
+const DEFAULT_CHUNK = 10;
+
+// Model roles rotate every 100 games so each provider plays every faction once
+// across the run. Roles are derived purely from the absolute game index, so the
+// rotation is identical no matter how the run is split into batches.
+function rolesForGame(gameIndex: number): Record<Faction, ModelProvider> {
+  if (gameIndex < 100) return { emperor: 'openai', foes: 'gemini', seljuks: 'claude' };
+  if (gameIndex < 200) return { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
+  return { emperor: 'claude', foes: 'openai', seljuks: 'gemini' };
+}
+
+// Resolve the URL this function can use to queue the next consecutive batch.
+function selfInvokeUrl(event: Parameters<Handler>[0]): string | null {
+  const base =
+    process.env.URL ||
+    process.env.DEPLOY_PRIME_URL ||
+    process.env.DEPLOY_URL ||
+    (event.headers?.host ? `https://${event.headers.host}` : '');
+  return base ? `${base}/.netlify/functions/batch-games-background` : null;
+}
+
+async function playFullGame(gameIndex: number) {
+  const gameId = `game-${gameIndex}`;
+  const roles = rolesForGame(gameIndex);
+  let state = createInitialState(gameId);
+
+  for (let round = 1; round <= 12; round++) {
+    const previousRound = state.history.length > 0 ? state.history[state.history.length - 1] : null;
+
+    const emperorPrompt = generatePrompt('emperor', state, previousRound?.allocations.emperor);
+    const foesPrompt = generatePrompt('foes', state, previousRound?.allocations.foes);
+    const seljuksPrompt = generatePrompt('seljuks', state, previousRound?.allocations.seljuks);
+
+    // Fall back to a safe allocation per faction so one failed call never aborts the game.
+    const [emperorAction, foesAction, seljuksAction] = await Promise.all([
+      getFactionAction(roles.emperor, emperorPrompt, 'emperor'),
+      getFactionAction(roles.foes, foesPrompt, 'foes'),
+      getFactionAction(roles.seljuks, seljuksPrompt, 'seljuks'),
+    ]);
+
+    state = resolveRound(state, { emperor: emperorAction, foes: foesAction, seljuks: seljuksAction });
+
+    // Small delay to respect rate limits
+    await delay(500);
+  }
+
+  return { gameId, roles, finalState: state };
+}
 
 export const handler: Handler = async (event) => {
   try {
-    const { batchId, startIndex, count }: { batchId: string, startIndex: number, count: number } = JSON.parse(event.body || '{}');
-
-    if (!batchId) {
-      return { statusCode: 400, body: 'Missing batchId' };
-    }
+    const body = JSON.parse(event.body || '{}');
+    const startIndex: number = Number.isInteger(body.startIndex) && body.startIndex >= 0 ? body.startIndex : 0;
+    const chunkSize: number = Number.isInteger(body.chunkSize) && body.chunkSize > 0 ? body.chunkSize : DEFAULT_CHUNK;
+    const total: number = Number.isInteger(body.total) && body.total > 0 ? body.total : TOTAL_GAMES;
 
     const gamesStore = getStore('mantzikert-games');
-    const results = [];
+    const end = Math.min(startIndex + chunkSize, total);
 
-    for (let i = 0; i < count; i++) {
-      const gameIndex = startIndex + i;
+    for (let gameIndex = startIndex; gameIndex < end; gameIndex++) {
       const gameId = `game-${gameIndex}`;
-      
-      // Determine roles based on index (1-100, 101-200, 201-300)
-      // Since it's 0-indexed:
-      // 0-99: openai, gemini, claude
-      // 100-199: gemini, claude, openai
-      // 200-299: claude, openai, gemini
-      let roles: Record<Faction, any> = { emperor: 'openai', foes: 'gemini', seljuks: 'claude' };
-      if (gameIndex >= 100 && gameIndex < 200) {
-        roles = { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
-      } else if (gameIndex >= 200) {
-        roles = { emperor: 'claude', foes: 'openai', seljuks: 'gemini' };
-      }
 
-      let state = createInitialState(gameId);
+      // Resume-safe: skip any game already stored so a restarted or re-fired
+      // chain fast-forwards through completed work instead of redoing it.
+      const existing = await gamesStore.get(gameId);
+      if (existing) continue;
 
-      for (let round = 1; round <= 12; round++) {
-        const previousRound = state.history.length > 0 ? state.history[state.history.length - 1] : null;
-
-        const emperorPrompt = generatePrompt('emperor', state, previousRound?.allocations.emperor);
-        const foesPrompt = generatePrompt('foes', state, previousRound?.allocations.foes);
-        const seljuksPrompt = generatePrompt('seljuks', state, previousRound?.allocations.seljuks);
-
-        const [emperorAction, foesAction, seljuksAction] = await Promise.all([
-          callLLM(roles.emperor, emperorPrompt),
-          callLLM(roles.foes, foesPrompt),
-          callLLM(roles.seljuks, seljuksPrompt)
-        ]);
-
-        state = resolveRound(state, {
-          emperor: emperorAction,
-          foes: foesAction,
-          seljuks: seljuksAction
-        });
-
-        // Small delay to respect rate limits
-        await delay(500);
-      }
-
-      results.push({
-        gameId,
-        roles,
-        finalState: state
-      });
-      
-      // Save intermediate to blobs so UI can see progress
-      await gamesStore.setJSON(gameId, { gameId, roles, finalState: state });
+      const result = await playFullGame(gameIndex);
+      await gamesStore.setJSON(gameId, result);
     }
 
-    // Save batch summary
-    await gamesStore.setJSON(`batch-${batchId}-${startIndex}`, { startIndex, count, completed: true });
+    // Chain the next consecutive batch once this chunk's games are stored.
+    if (end < total) {
+      const url = selfInvokeUrl(event);
+      if (url) {
+        await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ startIndex: end, chunkSize, total }),
+        }).catch((e) => console.error('Failed to chain next batch:', e));
+      } else {
+        console.error('Could not resolve self-invoke URL; chain stopped at index', end);
+      }
+    }
 
-    return { statusCode: 200, body: 'Batch completed' };
+    return { statusCode: 200, body: `Completed games ${startIndex}..${end - 1} of ${total}` };
   } catch (error: any) {
     console.error('Background batch error:', error);
     return { statusCode: 500, body: error.message };

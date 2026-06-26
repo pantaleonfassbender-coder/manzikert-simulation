@@ -5,8 +5,12 @@ import { MODEL_NAMES } from '../engine/models';
 const getModelName = (provider?: ModelProvider) => provider ? MODEL_NAMES[provider] : 'unknown';
 
 export function exportToExcel(games: any[]) {
+  // The store is built up consecutively as background games finish, so only
+  // include records that carry a resolved final state.
+  const completed = (games || []).filter(g => g && g.finalState && g.finalState.factions);
+
   // Sheet 1: Game Summaries
-  const summaries = games.map(g => ({
+  const summaries = completed.map(g => ({
     GameID: g.gameId,
     EmperorModel: getModelName(g.roles?.emperor),
     FoesModel: getModelName(g.roles?.foes),
@@ -20,7 +24,7 @@ export function exportToExcel(games: any[]) {
   const roundData: any[] = [];
   const selfAssessments: any[] = [];
 
-  games.forEach(g => {
+  completed.forEach(g => {
     const history = g.finalState?.history || [];
     history.forEach((r: RoundRecord) => {
       roundData.push({
