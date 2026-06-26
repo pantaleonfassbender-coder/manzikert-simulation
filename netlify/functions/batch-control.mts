@@ -1,4 +1,4 @@
-import { Handler } from '@netlify/functions';
+import type { Context } from '@netlify/functions';
 import {
   BatchControl,
   defaultControl,
@@ -16,11 +16,19 @@ function newRunId(previous: number): number {
 // the batch-run-background function (a 15-minute background worker) that the
 // authenticated browser triggers, so there is no server-to-server invocation
 // here (which the site's password protection would block).
-export const handler: Handler = async (event) => {
+//
+// This is a Netlify Functions v2 handler (default export, `.mts`). v2 is what
+// gives the function the ambient Netlify Blobs context with no configuration —
+// the previous v1 ("lambda compatibility") handler never received that context,
+// so every Blobs read/write threw and the run could never start.
+export default async (req: Request, _context: Context): Promise<Response> => {
   try {
-    const params = event.queryStringParameters || {};
-    const body = event.body ? JSON.parse(event.body) : {};
-    const action: string = body.action || params.action || 'status';
+    const url = new URL(req.url);
+    let body: any = {};
+    if (req.method === 'POST') {
+      body = await req.json().catch(() => ({}));
+    }
+    const action: string = body.action || url.searchParams.get('action') || 'status';
 
     const control = await getControl();
     let next: BatchControl = control;
@@ -72,16 +80,18 @@ export const handler: Handler = async (event) => {
       }
 
       default:
-        return { statusCode: 400, body: JSON.stringify({ error: `Unknown action: ${action}` }) };
+        return new Response(JSON.stringify({ error: `Unknown action: ${action}` }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
     }
 
-    return {
-      statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ control: next }),
-    };
+    return Response.json({ control: next });
   } catch (error: any) {
     console.error('batch-control error:', error);
-    return { statusCode: 500, body: JSON.stringify({ error: error.message }) };
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 };
