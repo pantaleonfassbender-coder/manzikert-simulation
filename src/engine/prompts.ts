@@ -4,7 +4,7 @@ export function generatePrompt(faction: Faction, state: GameState, previousAlloc
   const currentMonth = ['February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December', 'January'][state.currentRound - 1];
   const year = state.currentRound >= 12 ? 1072 : 1071;
 
-  let basePrompt = `You are playing a strategic simulation of the events leading up to the Battle of Mantzikert.\n`;
+  let basePrompt = `You are playing a strategic simulation of the events leading up to the Battle of Manzikert.\n`;
   basePrompt += `The current date is ${currentMonth} ${year} (Round ${state.currentRound} of 12).\n\n`;
 
   if (faction === 'emperor') {
@@ -12,13 +12,13 @@ export function generatePrompt(faction: Faction, state: GameState, previousAlloc
   } else if (faction === 'foes') {
     basePrompt += `You represent the internal foes of the Emperor (the Doukas Family). Your goal is to see Emperor Romanos fail or be overthrown, without destroying the Empire entirely if possible. You can secretly coordinate with the Seljuks.\n`;
   } else if (faction === 'seljuks') {
-    basePrompt += `You are Sultan Alp Arslan of the Seljuk Empire. Your goal is to conquer Byzantine territory (Mantzikert) and destroy the Emperor's army.\n`;
+    basePrompt += `You are Sultan Alp Arslan of the Seljuk Empire. Your goal is to conquer Byzantine territory (Manzikert) and destroy the Emperor's army.\n`;
   }
 
   basePrompt += `\nCURRENT GAME STATE:\n`;
   basePrompt += `- Emperor's Military Strength Base: ${state.factions.emperor.militaryStrength}\n`;
   basePrompt += `- Emperor's Internal Loyalty: ${state.factions.emperor.internalLoyalty.toFixed(1)}/100 (Modifies effective military)\n`;
-  basePrompt += `- Emperor's Territory Control (Mantzikert region): ${state.factions.emperor.territoryControl.toFixed(1)}/100\n`;
+  basePrompt += `- Emperor's Territory Control (Manzikert region): ${state.factions.emperor.territoryControl.toFixed(1)}/100\n`;
   basePrompt += `- Foes' Sabotage Capability Base: ${state.factions.foes.militaryStrength}\n`;
   basePrompt += `- Seljuk Military Strength Base: ${state.factions.seljuks.militaryStrength}\n\n`;
 

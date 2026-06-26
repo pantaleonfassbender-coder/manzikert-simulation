@@ -13,7 +13,7 @@ const Config: React.FC = () => {
   return (
     <div style={{ maxWidth: '600px', margin: '4rem auto' }}>
       <div className="header">
-        <h1>Mantzikert Simulation</h1>
+        <h1>Manzikert Simulation</h1>
         <p>1071 Agentic Strategy Test Case</p>
       </div>
 

@@ -59,7 +59,7 @@ export function resolveRound(state: GameState, allocations: Record<Faction, Acti
        events.push("Game Over: Emperor Romanos survives and holds the frontier.");
     } else if (nextState.factions.emperor.territoryControl <= 50) {
        nextState.winner = 'seljuks';
-       events.push("Game Over: Seljuks have conquered the frontier (Mantzikert).");
+       events.push("Game Over: Seljuks have conquered the frontier (Manzikert).");
     } else {
        nextState.winner = 'foes';
        events.push("Game Over: Emperor holds territory but is overthrown by internal foes.");
