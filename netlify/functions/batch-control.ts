@@ -3,17 +3,19 @@ import {
   BatchControl,
   defaultControl,
   getControl,
-  resolveBaseUrl,
   setControl,
-  triggerOrchestrator,
 } from '../../src/engine/batchStore';
 
-// Generates a fresh, monotonically increasing run id so any background chain
-// started by a previous run can detect it has been superseded.
+// Generates a fresh, monotonically increasing run id so any browser driver loop
+// started by a previous run can detect it has been superseded and stop.
 function newRunId(previous: number): number {
   return Math.max(previous + 1, Date.now());
 }
 
+// Manages the 300-game run's control record only. The run itself is advanced by
+// the authenticated browser calling batch-advance round by round, so there is no
+// server-to-server invocation here (which the site's password protection would
+// block).
 export const handler: Handler = async (event) => {
   try {
     const params = event.queryStringParameters || {};
@@ -21,8 +23,6 @@ export const handler: Handler = async (event) => {
     const action: string = body.action || params.action || 'status';
 
     const control = await getControl();
-    const baseUrl = resolveBaseUrl(event.headers as Record<string, string | undefined>);
-
     let next: BatchControl = control;
 
     switch (action) {
@@ -36,23 +36,22 @@ export const handler: Handler = async (event) => {
           status: 'running',
           runId: newRunId(control.runId),
         });
-        await triggerOrchestrator(baseUrl, next.runId);
         break;
       }
 
       case 'resume': {
-        if (control.nextIndex >= control.total) {
+        if (control.nextIndex >= control.total && !control.currentGame) {
           next = await setControl({ ...control, status: 'done' });
           break;
         }
-        // New run id retires any lingering chain before starting a fresh one.
+        // New run id retires any lingering driver before a fresh one takes over.
+        // currentGame is preserved so the run continues mid-game.
         next = await setControl({
           ...control,
           status: 'running',
           lastError: null,
           runId: newRunId(control.runId),
         });
-        await triggerOrchestrator(baseUrl, next.runId);
         break;
       }
 
@@ -62,8 +61,8 @@ export const handler: Handler = async (event) => {
       }
 
       case 'reset': {
-        // Bumping the run id stops any active chain; counters return to zero so
-        // a later Start re-runs the whole sample.
+        // Bumping the run id stops any active driver; counters and the
+        // in-progress game return to zero so a later Start re-runs the sample.
         next = await setControl({
           ...defaultControl(),
           status: 'idle',

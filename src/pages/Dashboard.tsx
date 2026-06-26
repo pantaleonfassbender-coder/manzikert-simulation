@@ -11,6 +11,7 @@ interface BatchControl {
   status: 'idle' | 'running' | 'paused' | 'done';
   total: number;
   nextIndex: number;
+  runId: number;
   lastError: string | null;
 }
 
@@ -102,17 +103,79 @@ const Dashboard: React.FC = () => {
 
   // ---- Batch run ------------------------------------------------------------
 
+  // Guards so only one browser-driven advance loop runs per tab, and so a loop
+  // can tell when it has been superseded by a newer run (Start/Reset bump runId).
+  const drivingRef = useRef(false);
+  const runIdRef = useRef<number>(0);
+
   const refreshBatchStatus = useCallback(async () => {
     try {
       const res = await fetch('/.netlify/functions/batch-control?action=status');
       const data = await res.json();
       if (data.control) setBatch(data.control);
+      return data.control as BatchControl | undefined;
     } catch (e) {
       console.error('Failed to read batch status', e);
+      return undefined;
     }
   }, []);
 
-  const sendBatchAction = async (action: 'start' | 'pause' | 'resume' | 'reset') => {
+  // Drives the 300-game run forward by repeatedly asking the server to play one
+  // round of the current game. The browser is already authenticated, so unlike a
+  // server-side self-invocation these calls are never blocked by the site's
+  // password protection. The loop stops as soon as the run is paused/finished or
+  // a newer run supersedes this one.
+  const driveBatch = useCallback(async (runId: number) => {
+    if (drivingRef.current) return; // a loop is already running in this tab
+    drivingRef.current = true;
+    runIdRef.current = runId;
+
+    let consecutiveErrors = 0;
+    try {
+      while (drivingRef.current && runIdRef.current === runId) {
+        try {
+          const res = await fetch('/.netlify/functions/batch-advance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ runId }),
+          });
+          if (!res.ok) throw new Error(`advance failed with status ${res.status}`);
+          const data = await res.json();
+          consecutiveErrors = 0;
+          if (data.control) setBatch(data.control);
+          if (!data.control || data.control.status !== 'running' || data.control.runId !== runId) {
+            break;
+          }
+        } catch (e) {
+          // Transient failure (e.g. a slow round hitting the function time
+          // limit). The last completed round is already persisted, so back off
+          // briefly and retry; give up after several straight failures.
+          console.error('batch advance error', e);
+          if (++consecutiveErrors >= 6) {
+            // Too many straight failures: pause so the run can be resumed later
+            // rather than spinning. Pause directly to avoid hammering on.
+            try {
+              const res = await fetch('/.netlify/functions/batch-control', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'pause' }),
+              });
+              const data = await res.json();
+              if (data.control) setBatch(data.control);
+            } catch {
+              /* ignore */
+            }
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 2000 * consecutiveErrors));
+        }
+      }
+    } finally {
+      if (runIdRef.current === runId) drivingRef.current = false;
+    }
+  }, []);
+
+  const sendBatchAction = useCallback(async (action: 'start' | 'pause' | 'resume' | 'reset') => {
     try {
       const res = await fetch('/.netlify/functions/batch-control', {
         method: 'POST',
@@ -120,19 +183,43 @@ const Dashboard: React.FC = () => {
         body: JSON.stringify({ action })
       });
       const data = await res.json();
-      if (data.control) setBatch(data.control);
+      if (data.control) {
+        setBatch(data.control);
+        if (action === 'start' || action === 'resume') {
+          if (data.control.status === 'running') {
+            drivingRef.current = false; // release any prior loop before starting
+            driveBatch(data.control.runId);
+          }
+        } else {
+          // pause / reset: stop this tab's driver.
+          drivingRef.current = false;
+          runIdRef.current = data.control.runId;
+        }
+      }
     } catch (e) {
       console.error(e);
       alert(`Failed to ${action} the batch run`);
     }
-  };
+  }, [driveBatch]);
 
-  // Poll while a run is active so progress and pause/resume stay in sync.
+  // Poll while a run is active so progress and pause/resume stay in sync. If a
+  // run is already "running" (e.g. after a page reload) and nothing is driving
+  // it in this tab, pick the work back up automatically.
   useEffect(() => {
-    refreshBatchStatus();
-    const interval = setInterval(refreshBatchStatus, 5000);
-    return () => clearInterval(interval);
-  }, [refreshBatchStatus]);
+    let cancelled = false;
+    const tick = async () => {
+      const control = await refreshBatchStatus();
+      if (!cancelled && control?.status === 'running' && !drivingRef.current) {
+        driveBatch(control.runId);
+      }
+    };
+    tick();
+    const interval = setInterval(tick, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [refreshBatchStatus, driveBatch]);
 
   const handleDownload = async () => {
     setDownloading(true);

@@ -1,5 +1,6 @@
 import { getStore } from '@netlify/blobs';
 import { TOTAL_GAMES } from './runner';
+import type { GameState } from './types';
 
 export const GAMES_STORE = 'mantzikert-games';
 export const CONTROL_KEY = 'control';
@@ -10,14 +11,19 @@ export type BatchStatus = 'idle' | 'running' | 'paused' | 'done';
 export interface BatchControl {
   status: BatchStatus;
   total: number;
-  // Index of the next game to dispatch (0..total). Doubles as progress.
+  // Index of the game currently being played (0..total). Doubles as the count
+  // of fully completed games, since it is only incremented once a game finishes.
   nextIndex: number;
-  // Bumped whenever a fresh run is started/resumed so stale self-chained
-  // invocations can detect they have been superseded and stop.
+  // Bumped whenever a fresh run is started/resumed so a stale browser driver
+  // loop can detect it has been superseded and stop.
   runId: number;
   blockSize: number;
   updatedAt: number;
   lastError: string | null;
+  // The in-progress game's state, persisted between round advances so a run can
+  // be paused, resumed, or recovered after a reload without losing its place.
+  // Null while between games.
+  currentGame: GameState | null;
 }
 
 export function defaultControl(): BatchControl {
@@ -29,6 +35,7 @@ export function defaultControl(): BatchControl {
     blockSize: DEFAULT_BLOCK_SIZE,
     updatedAt: Date.now(),
     lastError: null,
+    currentGame: null,
   };
 }
 
@@ -50,7 +57,9 @@ export function gamesStore() {
 export async function getControl(): Promise<BatchControl> {
   const store = gamesStore();
   const existing = (await store.get(CONTROL_KEY, { type: 'json' })) as BatchControl | null;
-  return existing ?? defaultControl();
+  // Merge over defaults so records written by older versions (without the
+  // currentGame field) still load with every property present.
+  return existing ? { ...defaultControl(), ...existing } : defaultControl();
 }
 
 export async function setControl(control: BatchControl): Promise<BatchControl> {
@@ -58,29 +67,4 @@ export async function setControl(control: BatchControl): Promise<BatchControl> {
   const next = { ...control, updatedAt: Date.now() };
   await store.setJSON(CONTROL_KEY, next);
   return next;
-}
-
-// Resolves the deployed base URL so a function can invoke a sibling function
-// (e.g. self-chaining the background orchestrator). The inbound request host is
-// preferred so self-invocation always targets the exact same deploy; the
-// platform env vars are a fallback (e.g. when host is unavailable).
-export function resolveBaseUrl(headers: Record<string, string | undefined>): string {
-  const host = headers['host'] || headers['x-forwarded-host'];
-  if (host) {
-    const proto = headers['x-forwarded-proto'] || (host.startsWith('localhost') ? 'http' : 'https');
-    return `${proto}://${host}`;
-  }
-  return process.env.URL || process.env.DEPLOY_URL || 'http://localhost:8888';
-}
-
-export async function triggerOrchestrator(baseUrl: string, runId: number): Promise<void> {
-  try {
-    await fetch(`${baseUrl}/.netlify/functions/batch-games-background`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ runId }),
-    });
-  } catch (error) {
-    console.error('Failed to trigger background orchestrator:', error);
-  }
 }

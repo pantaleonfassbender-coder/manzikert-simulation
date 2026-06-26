@@ -1,3 +1,6 @@
+import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import type { ModelProvider, ActionAllocation } from './types';
 import { MODEL_NAMES } from './models';
 
@@ -15,6 +18,8 @@ const MAX_BACKOFF_MS = 20000;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function isRetryableError(error: unknown): boolean {
+  const status = (error as { status?: number })?.status;
+  if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
   if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
     return true;
@@ -54,156 +59,113 @@ async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
   throw lastError;
 }
 
-type JsonValue = Record<string, any>;
-type ProviderConfig = {
-  baseUrl: string;
-  headers: HeadersInit;
-};
-
-function getGatewayFallback(provider: 'anthropic' | 'google' | 'openai'): ProviderConfig {
-  const gatewayBaseUrl = process.env.NETLIFY_AI_GATEWAY_BASE_URL;
-  const gatewayKey = process.env.NETLIFY_AI_GATEWAY_KEY;
-
-  if (!gatewayBaseUrl || !gatewayKey) {
-    throw new Error(`Netlify AI Gateway environment is not available for ${provider} in this server context.`);
-  }
-
-  return {
-    baseUrl: `${gatewayBaseUrl.replace(/\/$/, '')}/${provider}`,
-    headers: { Authorization: `Bearer ${gatewayKey}` },
-  };
+// Inference is proxied through the Netlify AI Gateway using the official
+// provider SDKs. In a deployed Netlify context the platform injects per-provider
+// credentials (OPENAI_API_KEY/OPENAI_BASE_URL, etc.), so the SDKs route through
+// the gateway with no extra config. When those are absent (local dev, scripts)
+// we fall back to the always-present gateway key + base URL. Crucially, each SDK
+// already knows the correct request path for its provider, which avoids the
+// hand-built URL mistakes that previously caused a faction's calls to 404 and
+// silently fall back to a canned move.
+function gatewayCreds(): { baseUrl: string; key: string } | null {
+  const baseUrl = process.env.NETLIFY_AI_GATEWAY_BASE_URL;
+  const key = process.env.NETLIFY_AI_GATEWAY_KEY;
+  if (baseUrl && key) return { baseUrl: baseUrl.replace(/\/$/, ''), key };
+  return null;
 }
 
-function getOpenAIConfig(): ProviderConfig {
-  if (process.env.OPENAI_BASE_URL && process.env.OPENAI_API_KEY) {
-    return {
-      baseUrl: process.env.OPENAI_BASE_URL.replace(/\/$/, ''),
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-    };
+function openaiClient(): OpenAI {
+  if (process.env.OPENAI_API_KEY) {
+    return new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+      baseURL: process.env.OPENAI_BASE_URL,
+      timeout: AI_REQUEST_TIMEOUT_MS,
+    });
   }
-
-  return getGatewayFallback('openai');
+  const gw = gatewayCreds();
+  if (gw) return new OpenAI({ apiKey: gw.key, baseURL: `${gw.baseUrl}/v1`, timeout: AI_REQUEST_TIMEOUT_MS });
+  throw new Error('No OpenAI or AI Gateway credentials are available in this context.');
 }
 
-function getAnthropicConfig(): ProviderConfig {
-  if (process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY) {
-    return {
-      baseUrl: process.env.ANTHROPIC_BASE_URL.replace(/\/$/, ''),
-      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY },
-    };
+function anthropicClient(): Anthropic {
+  if (process.env.ANTHROPIC_API_KEY) {
+    return new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+      baseURL: process.env.ANTHROPIC_BASE_URL,
+      timeout: AI_REQUEST_TIMEOUT_MS,
+    });
   }
-
-  return getGatewayFallback('anthropic');
+  const gw = gatewayCreds();
+  if (gw) return new Anthropic({ apiKey: gw.key, baseURL: gw.baseUrl, timeout: AI_REQUEST_TIMEOUT_MS });
+  throw new Error('No Anthropic or AI Gateway credentials are available in this context.');
 }
 
-function getGeminiConfig(): ProviderConfig {
-  if (process.env.GOOGLE_GEMINI_BASE_URL && process.env.GEMINI_API_KEY) {
-    return {
-      baseUrl: process.env.GOOGLE_GEMINI_BASE_URL.replace(/\/$/, ''),
-      headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY },
-    };
+function geminiClient(): GoogleGenAI {
+  if (process.env.GEMINI_API_KEY) {
+    return new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: process.env.GOOGLE_GEMINI_BASE_URL ? { baseUrl: process.env.GOOGLE_GEMINI_BASE_URL } : undefined,
+    });
   }
-
-  return getGatewayFallback('google');
+  const gw = gatewayCreds();
+  if (gw) return new GoogleGenAI({ apiKey: gw.key, httpOptions: { baseUrl: gw.baseUrl } });
+  throw new Error('No Gemini or AI Gateway credentials are available in this context.');
 }
 
-async function postJson(url: string, config: ProviderConfig, body: JsonValue, headers: HeadersInit = {}) {
-  const response = await fetch(url, {
-    method: 'POST',
-    signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
-    headers: {
-      'Content-Type': 'application/json',
-      ...config.headers,
-      ...headers,
-    },
-    body: JSON.stringify(body),
-  });
-
-  const responseText = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`AI Gateway request failed with status ${response.status}: ${responseText}`);
-  }
-
-  return JSON.parse(responseText);
-}
-
-async function callOpenAI(prompt: string) {
-  const config = getOpenAIConfig();
-  const data = await postJson(`${config.baseUrl}/v1/chat/completions`, config, {
+async function callOpenAI(prompt: string): Promise<string> {
+  const completion = await openaiClient().chat.completions.create({
     model: MODEL_NAMES.openai,
     messages: [
-      {
-        role: 'system',
-        content: 'Return only valid JSON. Do not include markdown or commentary.',
-      },
+      { role: 'system', content: 'Return only valid JSON. Do not include markdown or commentary.' },
       { role: 'user', content: prompt },
     ],
     response_format: { type: 'json_object' },
   });
-
-  return data.choices?.[0]?.message?.content || '{}';
+  return completion.choices?.[0]?.message?.content || '{}';
 }
 
-async function callGemini(prompt: string) {
-  const config = getGeminiConfig();
-  const data = await postJson(`${config.baseUrl}/v1beta/models/${MODEL_NAMES.gemini}:generateContent`, config, {
-    contents: [
-      {
-        role: 'user',
-        parts: [{ text: prompt }],
-      },
-    ],
-    generationConfig: {
-      responseMimeType: 'application/json',
-    },
+async function callGemini(prompt: string): Promise<string> {
+  const response = await geminiClient().models.generateContent({
+    model: MODEL_NAMES.gemini,
+    contents: prompt,
+    config: { responseMimeType: 'application/json', maxOutputTokens: 1500 },
   });
-
-  return data.candidates?.[0]?.content?.parts?.map((part: JsonValue) => part.text || '').join('') || '{}';
+  return response.text || '{}';
 }
 
-async function callClaude(prompt: string) {
-  const config = getAnthropicConfig();
-  const data = await postJson(
-    `${config.baseUrl}/v1/messages`,
-    config,
-    {
-      model: MODEL_NAMES.claude,
-      max_tokens: 1000,
-      messages: [{ role: 'user', content: `${prompt}\n\nOutput only valid JSON.` }],
-    },
-    { 'anthropic-version': '2023-06-01' },
-  );
-
-  return data.content?.map((block: JsonValue) => block.text || '').join('') || '{}';
+async function callClaude(prompt: string): Promise<string> {
+  const message = await anthropicClient().messages.create({
+    model: MODEL_NAMES.claude,
+    max_tokens: 1500,
+    messages: [{ role: 'user', content: `${prompt}\n\nOutput only valid JSON.` }],
+  });
+  return message.content
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('') || '{}';
 }
 
-// Inference is proxied through Netlify AI Gateway. Netlify injects provider
-// URLs and credentials into server-side contexts for these direct HTTP calls.
 export async function callLLM(provider: ModelProvider, prompt: string): Promise<ActionAllocation> {
   let rawJson = '';
 
   try {
     if (provider === 'openai') {
       rawJson = await withRetry(() => callOpenAI(prompt), 'openai');
-    }
-    else if (provider === 'gemini') {
+    } else if (provider === 'gemini') {
       rawJson = await withRetry(() => callGemini(prompt), 'gemini');
-    }
-    else if (provider === 'claude') {
+    } else if (provider === 'claude') {
       rawJson = await withRetry(() => callClaude(prompt), 'claude');
     }
 
-    // Try extracting JSON if wrapped in markdown
+    // Strip any markdown fencing the model may add before parsing.
     rawJson = rawJson.replace(/```json\n?|\n?```/g, '').trim();
     const parsed = JSON.parse(rawJson);
-    
-    // Normalize and validate
+
+    // Normalize and validate the three allocation channels.
     let military = Number(parsed.military) || 0;
     let diplomacy = Number(parsed.diplomacy) || 0;
     let internal = Number(parsed.internal) || 0;
-    
-    // Auto-balance if they don't add to 100
+
+    // Auto-balance if they don't add to 100.
     const total = military + diplomacy + internal;
     if (total !== 100 && total > 0) {
       military = Math.round((military / total) * 100);
@@ -218,7 +180,7 @@ export async function callLLM(provider: ModelProvider, prompt: string): Promise<
       diplomacy,
       internal,
       messages: parsed.messages || {},
-      selfAssessment: parsed.selfAssessment || 'No assessment provided.'
+      selfAssessment: parsed.selfAssessment || 'No assessment provided.',
     };
   } catch (error) {
     console.error(`Error calling ${provider}:`, error);
