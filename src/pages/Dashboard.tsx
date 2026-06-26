@@ -1,53 +1,60 @@
-import React, { useState } from 'react';
-import { Download, FastForward, Play } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Download, FastForward, Pause, Play, RotateCcw, Square } from 'lucide-react';
 import type { GameState, GameConfig } from '../engine/types';
+import { createInitialState } from '../engine/engine';
 import { exportToExcel } from '../utils/exportExcel';
 import { MODEL_NAMES } from '../engine/models';
 
-const INITIAL_STATE: GameState = {
-  gameId: 'game-spectator',
-  currentRound: 1,
-  factions: {
-    emperor: { militaryStrength: 100, internalLoyalty: 50, territoryControl: 100 },
-    foes: { militaryStrength: 20, internalLoyalty: 80, territoryControl: 0 },
-    seljuks: { militaryStrength: 80, internalLoyalty: 100, territoryControl: 0 },
-  },
-  history: [],
-  winner: null,
-};
+const SPECTATOR_ID = 'game-spectator';
+
+interface BatchControl {
+  status: 'idle' | 'running' | 'paused' | 'done';
+  total: number;
+  nextIndex: number;
+  lastError: string | null;
+}
 
 const Dashboard: React.FC = () => {
-  const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
+  const [gameState, setGameState] = useState<GameState>(() => createInitialState(SPECTATOR_ID));
   const [isPlaying, setIsPlaying] = useState(false);
-  const [backgroundProgress, setBackgroundProgress] = useState(0);
+  const [autoRunning, setAutoRunning] = useState(false);
+  const [batch, setBatch] = useState<BatchControl | null>(null);
   const [downloading, setDownloading] = useState(false);
 
+  // Lets the auto-play loop be interrupted by the Stop button.
+  const autoRef = useRef(false);
+
   const config: GameConfig = {
-    gameId: 'game-spectator',
+    gameId: SPECTATOR_ID,
     roles: { emperor: 'openai', foes: 'gemini', seljuks: 'claude' }
   };
 
+  // ---- Spectator / demo game ------------------------------------------------
+
+  // Plays a single round against the supplied state and returns the next state
+  // so the auto-play loop can chain rounds without waiting on React state.
+  const requestRound = async (state: GameState): Promise<GameState> => {
+    const res = await fetch('/.netlify/functions/play-round', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state, config })
+    });
+    if (!res.ok) {
+      throw new Error(`Round request failed with status ${res.status}`);
+    }
+    const data = await res.json();
+    if (!data.nextState) {
+      throw new Error('Round response did not include a next game state');
+    }
+    return data.nextState as GameState;
+  };
+
   const playNextRound = async () => {
-    if (gameState.currentRound > 12 || isPlaying) return;
+    if (gameState.currentRound > 12 || gameState.winner || isPlaying || autoRunning) return;
     setIsPlaying(true);
-
     try {
-      const res = await fetch('/.netlify/functions/play-round', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: gameState, config })
-      });
-
-      if (!res.ok) {
-        throw new Error(`Round request failed with status ${res.status}`);
-      }
-
-      const data = await res.json();
-      if (data.nextState) {
-        setGameState(data.nextState);
-      } else {
-        throw new Error('Round response did not include a next game state');
-      }
+      const next = await requestRound(gameState);
+      setGameState(next);
     } catch (e) {
       console.error(e);
       alert('Error playing round');
@@ -56,56 +63,118 @@ const Dashboard: React.FC = () => {
     }
   };
 
-  const startBackgroundBatch = async () => {
-    const totalGames = 299;
-    const batchSize = 10;
-    const numBatches = Math.ceil(totalGames / batchSize);
-    
-    // We fire and forget them in chunks to Netlify background functions
-    // Note: Netlify free tier might rate limit concurrent background functions,
-    // so we will just fire them off. In a real production system we'd use a queue.
-    for (let i = 0; i < numBatches; i++) {
-      const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
-      const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
-      fetch('/.netlify/functions/batch-games-background', {
-        method: 'POST',
-        body: JSON.stringify({ batchId: 'main', startIndex, count })
-      }).catch(console.error);
+  // Runs a full 12-round demo game on its own so a viewer can watch the
+  // simulation mechanics end to end without clicking through every round.
+  const playFullDemo = async () => {
+    if (autoRunning || isPlaying) return;
+    autoRef.current = true;
+    setAutoRunning(true);
+
+    let state = gameState.winner || gameState.currentRound > 12
+      ? createInitialState(SPECTATOR_ID)
+      : gameState;
+    setGameState(state);
+
+    try {
+      while (autoRef.current && state.currentRound <= 12 && !state.winner) {
+        state = await requestRound(state);
+        setGameState(state);
+        // Brief pause so the viewer can follow each round.
+        await new Promise((r) => setTimeout(r, 700));
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Demo game stopped due to an error');
+    } finally {
+      autoRef.current = false;
+      setAutoRunning(false);
     }
-    
-    alert('Started 299 games in the background. Check back in a few minutes to download results.');
-    
-    // Mock progress bar
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 5;
-      setBackgroundProgress(Math.min(prog, 100));
-      if (prog >= 100) clearInterval(interval);
-    }, 10000);
   };
+
+  const stopDemo = () => {
+    autoRef.current = false;
+  };
+
+  const resetDemo = () => {
+    if (autoRunning) return;
+    setGameState(createInitialState(SPECTATOR_ID));
+  };
+
+  // ---- Batch run ------------------------------------------------------------
+
+  const refreshBatchStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/.netlify/functions/batch-control?action=status');
+      const data = await res.json();
+      if (data.control) setBatch(data.control);
+    } catch (e) {
+      console.error('Failed to read batch status', e);
+    }
+  }, []);
+
+  const sendBatchAction = async (action: 'start' | 'pause' | 'resume' | 'reset') => {
+    try {
+      const res = await fetch('/.netlify/functions/batch-control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      });
+      const data = await res.json();
+      if (data.control) setBatch(data.control);
+    } catch (e) {
+      console.error(e);
+      alert(`Failed to ${action} the batch run`);
+    }
+  };
+
+  // Poll while a run is active so progress and pause/resume stay in sync.
+  useEffect(() => {
+    refreshBatchStatus();
+    const interval = setInterval(refreshBatchStatus, 5000);
+    return () => clearInterval(interval);
+  }, [refreshBatchStatus]);
 
   const handleDownload = async () => {
     setDownloading(true);
     try {
       const res = await fetch('/.netlify/functions/list-games');
       const data = await res.json();
-      
-      // Merge spectator game with background games
-      const allGames = [{ gameId: 'game-0', roles: config.roles, finalState: gameState }, ...(data.games || [])];
+
+      const batchGames = data.games || [];
+      // Include the live spectator/demo game if it has been played at all.
+      const allGames =
+        gameState.history.length > 0
+          ? [{ gameId: SPECTATOR_ID, roles: config.roles, finalState: gameState }, ...batchGames]
+          : batchGames;
+
+      if (allGames.length === 0) {
+        alert('No completed games to export yet. Start the batch run or play the demo first.');
+        return;
+      }
       exportToExcel(allGames);
     } catch (e) {
       console.error(e);
       alert('Failed to download excel');
+    } finally {
+      setDownloading(false);
     }
-    setDownloading(false);
   };
+
+  const batchStatus = batch?.status ?? 'idle';
+  const completed = batch?.nextIndex ?? 0;
+  const total = batch?.total ?? 300;
+  const progressPct = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+  const isRunning = batchStatus === 'running';
+  const isPaused = batchStatus === 'paused';
+  const isDone = batchStatus === 'done';
+
+  const lastRecord = gameState.history.length > 0 ? gameState.history[gameState.history.length - 1] : null;
 
   return (
     <div>
       <div className="header" style={{ marginBottom: '2rem' }}>
         <h1>Live Simulation Monitor</h1>
-        <p>Spectator Game (1 of 300)</p>
+        <p>Spectator Demo Game &amp; 300-Game Sampling Run</p>
       </div>
 
       <div className="grid grid-cols-3">
@@ -117,9 +186,9 @@ const Dashboard: React.FC = () => {
             <p>Loyalty: {gameState.factions.emperor.internalLoyalty.toFixed(1)} / 100</p>
             <p>Territory: {gameState.factions.emperor.territoryControl.toFixed(1)} / 100</p>
           </div>
-          {gameState.history.length > 0 && (
+          {lastRecord && (
              <div style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                <em>"{gameState.history[gameState.history.length-1].allocations.emperor.selfAssessment}"</em>
+                <em>"{lastRecord.allocations.emperor.selfAssessment}"</em>
              </div>
           )}
         </div>
@@ -131,9 +200,9 @@ const Dashboard: React.FC = () => {
           <div style={{ marginTop: '1rem' }}>
             <p>Loyalty: {gameState.factions.foes.internalLoyalty.toFixed(1)} / 100</p>
           </div>
-          {gameState.history.length > 0 && (
+          {lastRecord && (
              <div style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                <em>"{gameState.history[gameState.history.length-1].allocations.foes.selfAssessment}"</em>
+                <em>"{lastRecord.allocations.foes.selfAssessment}"</em>
              </div>
           )}
         </div>
@@ -145,31 +214,58 @@ const Dashboard: React.FC = () => {
           <div style={{ marginTop: '1rem' }}>
             <p>Territory: {gameState.factions.seljuks.territoryControl.toFixed(1)} / 100</p>
           </div>
-          {gameState.history.length > 0 && (
+          {lastRecord && (
              <div style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                <em>"{gameState.history[gameState.history.length-1].allocations.seljuks.selfAssessment}"</em>
+                <em>"{lastRecord.allocations.seljuks.selfAssessment}"</em>
              </div>
           )}
         </div>
       </div>
 
       <div className="glass-panel" style={{ marginTop: '2rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
           <div>
-            <h2>Round {Math.min(gameState.currentRound, 12)} / 12</h2>
+            <h2>Demo Game — Round {Math.min(gameState.currentRound, 12)} / 12</h2>
             {gameState.winner && <p style={{ color: 'var(--accent-color)', fontWeight: 'bold' }}>Winner: {gameState.winner.toUpperCase()}</p>}
           </div>
-          <button 
-            className="btn btn-primary"
-            onClick={playNextRound}
-            disabled={isPlaying || gameState.currentRound > 12}
-          >
-            {isPlaying ? 'Computing...' : <><Play size={18} style={{ marginRight: '0.5rem' }} /> Play Next Round</>}
-          </button>
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+            <button
+              className="btn btn-primary"
+              onClick={playFullDemo}
+              disabled={autoRunning || isPlaying}
+            >
+              <FastForward size={18} style={{ marginRight: '0.5rem' }} />
+              {autoRunning ? 'Running Demo…' : 'Run Full Demo Game'}
+            </button>
+
+            {autoRunning ? (
+              <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={stopDemo}>
+                <Square size={18} style={{ marginRight: '0.5rem' }} /> Stop
+              </button>
+            ) : (
+              <button
+                className="btn"
+                style={{ background: 'rgba(255,255,255,0.1)' }}
+                onClick={playNextRound}
+                disabled={isPlaying || gameState.currentRound > 12 || !!gameState.winner}
+              >
+                {isPlaying ? 'Computing…' : <><Play size={18} style={{ marginRight: '0.5rem' }} /> Play Next Round</>}
+              </button>
+            )}
+
+            <button
+              className="btn"
+              style={{ background: 'rgba(255,255,255,0.1)' }}
+              onClick={resetDemo}
+              disabled={autoRunning || isPlaying}
+            >
+              <RotateCcw size={18} style={{ marginRight: '0.5rem' }} /> Reset
+            </button>
+          </div>
         </div>
 
-        <div style={{ marginTop: '1.5rem', maxHeight: '200px', overflowY: 'auto', background: 'rgba(0,0,0,0.3)', padding: '1rem', borderRadius: '8px' }}>
-          {gameState.history.length === 0 && <p style={{ color: 'var(--text-secondary)' }}>Game has not started yet.</p>}
+        <div style={{ marginTop: '1.5rem', maxHeight: '220px', overflowY: 'auto', background: 'rgba(0,0,0,0.3)', padding: '1rem', borderRadius: '8px' }}>
+          {gameState.history.length === 0 && <p style={{ color: 'var(--text-secondary)' }}>Demo game has not started yet.</p>}
           {gameState.history.map((record, i) => (
             <div key={i} style={{ marginBottom: '1rem' }}>
               <strong style={{ color: 'var(--accent-color)' }}>Round {record.round} Events:</strong>
@@ -182,29 +278,52 @@ const Dashboard: React.FC = () => {
       </div>
 
       <div className="glass-panel" style={{ marginTop: '2rem' }}>
-        <h2>Batch Processing</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the remaining 299 games in the background and export all data to Excel.</p>
-        
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          <button className="btn btn-primary" onClick={startBackgroundBatch}>
-            <FastForward size={18} style={{ marginRight: '0.5rem' }} /> 
-            Start 299 Background Games
-          </button>
+        <h2>300-Game Sampling Run</h2>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+          Runs all {total} games in the background, one block at a time so the model calls never overwhelm the
+          gateway. The run can be paused and resumed at any point, and results can be exported to Excel in between.
+        </p>
+
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+          {!isRunning ? (
+            <button className="btn btn-primary" onClick={() => sendBatchAction(isPaused ? 'resume' : 'start')}>
+              <Play size={18} style={{ marginRight: '0.5rem' }} />
+              {isPaused ? 'Resume Run' : isDone ? 'Restart Run' : `Start ${total} Games`}
+            </button>
+          ) : (
+            <button className="btn btn-primary" onClick={() => sendBatchAction('pause')}>
+              <Pause size={18} style={{ marginRight: '0.5rem' }} /> Pause Run
+            </button>
+          )}
+
+          {(isPaused || isDone) && (
+            <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={() => sendBatchAction('reset')}>
+              <RotateCcw size={18} style={{ marginRight: '0.5rem' }} /> Reset
+            </button>
+          )}
 
           <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={handleDownload} disabled={downloading}>
-            <Download size={18} style={{ marginRight: '0.5rem' }} /> 
-            {downloading ? 'Preparing Excel...' : 'Download Results'}
+            <Download size={18} style={{ marginRight: '0.5rem' }} />
+            {downloading ? 'Preparing Excel…' : 'Download Results'}
           </button>
         </div>
 
-        {backgroundProgress > 0 && (
-           <div style={{ marginTop: '1.5rem' }}>
-             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Background jobs initiated...</p>
-             <div className="progress-bar">
-               <div className="progress-fill" style={{ width: `${backgroundProgress}%` }}></div>
-             </div>
-           </div>
-        )}
+        <div style={{ marginTop: '1.5rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+            <span>
+              Status: <strong style={{ color: 'var(--text-primary)', textTransform: 'capitalize' }}>{batchStatus}</strong>
+            </span>
+            <span>{completed} / {total} games ({progressPct}%)</span>
+          </div>
+          <div className="progress-bar">
+            <div className="progress-fill" style={{ width: `${progressPct}%` }}></div>
+          </div>
+          {batch?.lastError && (
+            <p style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--foes-color)' }}>
+              Last error: {batch.lastError}
+            </p>
+          )}
+        </div>
       </div>
 
     </div>

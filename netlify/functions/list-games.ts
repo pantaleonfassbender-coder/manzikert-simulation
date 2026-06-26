@@ -1,22 +1,26 @@
 import { Handler } from '@netlify/functions';
-import { getStore } from '@netlify/blobs';
+import { gamesStore, getControl } from '../../src/engine/batchStore';
 
 export const handler: Handler = async () => {
   try {
-    const gamesStore = getStore('mantzikert-games');
-    const { blobs } = await gamesStore.list();
-    
-    // Fetch all game data
-    const games = await Promise.all(
-      blobs
-        .filter(b => b.key.startsWith('game-'))
-        .map(async (b) => await gamesStore.getJSON(b.key))
-    );
+    const store = gamesStore();
+    const { blobs } = await store.list();
+
+    // Only game records (skip the control key and any batch metadata).
+    const games = (
+      await Promise.all(
+        blobs
+          .filter((b) => b.key.startsWith('game-'))
+          .map((b) => store.get(b.key, { type: 'json' })),
+      )
+    ).filter(Boolean);
+
+    const control = await getControl();
 
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ games })
+      body: JSON.stringify({ games, control }),
     };
   } catch (error: any) {
     console.error('List games error:', error);

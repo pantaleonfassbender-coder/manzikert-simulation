@@ -1,81 +1,78 @@
 import { Handler } from '@netlify/functions';
-import { getStore } from '@netlify/blobs';
-import { Faction } from '../../src/engine/types';
-import { createInitialState, resolveRound } from '../../src/engine/engine';
-import { generatePrompt } from '../../src/engine/prompts';
-import { callLLM } from '../../src/engine/llmClients';
+import { runFullGame } from '../../src/engine/runner';
+import {
+  gamesStore,
+  getControl,
+  resolveBaseUrl,
+  setControl,
+  triggerOrchestrator,
+} from '../../src/engine/batchStore';
 
-// Helper to delay
-const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+// Self-chained background orchestrator. Each invocation processes games one at
+// a time (so only a handful of model calls are ever in flight) until either the
+// sample is exhausted, the run is paused, or it approaches the background
+// runtime ceiling — at which point it hands off to a fresh invocation. This
+// chaining is what lets a 300-game run complete without firing dozens of
+// concurrent jobs and overwhelming the AI Gateway.
+const TIME_BUDGET_MS = 8 * 60 * 1000; // stay well under the 15 min background limit
 
 export const handler: Handler = async (event) => {
+  const startedAt = Date.now();
+
   try {
-    const { batchId, startIndex, count }: { batchId: string, startIndex: number, count: number } = JSON.parse(event.body || '{}');
+    const { runId }: { runId?: number } = event.body ? JSON.parse(event.body) : {};
+    const store = gamesStore();
 
-    if (!batchId) {
-      return { statusCode: 400, body: 'Missing batchId' };
-    }
+    while (true) {
+      const control = await getControl();
 
-    const gamesStore = getStore('mantzikert-games');
-    const results = [];
-
-    for (let i = 0; i < count; i++) {
-      const gameIndex = startIndex + i;
-      const gameId = `game-${gameIndex}`;
-      
-      // Determine roles based on index (1-100, 101-200, 201-300)
-      // Since it's 0-indexed:
-      // 0-99: openai, gemini, claude
-      // 100-199: gemini, claude, openai
-      // 200-299: claude, openai, gemini
-      let roles: Record<Faction, any> = { emperor: 'openai', foes: 'gemini', seljuks: 'claude' };
-      if (gameIndex >= 100 && gameIndex < 200) {
-        roles = { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
-      } else if (gameIndex >= 200) {
-        roles = { emperor: 'claude', foes: 'openai', seljuks: 'gemini' };
+      // Stop if paused, finished, or superseded by a newer run.
+      if (control.status !== 'running') break;
+      if (typeof runId === 'number' && control.runId !== runId) break;
+      if (control.nextIndex >= control.total) {
+        await setControl({ ...control, status: 'done' });
+        break;
       }
 
-      let state = createInitialState(gameId);
+      // Claim this index up front so a concurrent chain can't process it too.
+      const index = control.nextIndex;
+      await setControl({ ...control, nextIndex: index + 1 });
 
-      for (let round = 1; round <= 12; round++) {
-        const previousRound = state.history.length > 0 ? state.history[state.history.length - 1] : null;
-
-        const emperorPrompt = generatePrompt('emperor', state, previousRound?.allocations.emperor);
-        const foesPrompt = generatePrompt('foes', state, previousRound?.allocations.foes);
-        const seljuksPrompt = generatePrompt('seljuks', state, previousRound?.allocations.seljuks);
-
-        const [emperorAction, foesAction, seljuksAction] = await Promise.all([
-          callLLM(roles.emperor, emperorPrompt),
-          callLLM(roles.foes, foesPrompt),
-          callLLM(roles.seljuks, seljuksPrompt)
-        ]);
-
-        state = resolveRound(state, {
-          emperor: emperorAction,
-          foes: foesAction,
-          seljuks: seljuksAction
-        });
-
-        // Small delay to respect rate limits
-        await delay(500);
+      try {
+        const result = await runFullGame(index);
+        await store.setJSON(result.gameId, result);
+      } catch (error: any) {
+        // runFullGame falls back per-faction and should not throw, but never
+        // let one bad game halt the whole sample.
+        console.error(`Game ${index} failed:`, error);
+        const latest = await getControl();
+        await setControl({ ...latest, lastError: `Game ${index}: ${error.message}` });
       }
 
-      results.push({
-        gameId,
-        roles,
-        finalState: state
-      });
-      
-      // Save intermediate to blobs so UI can see progress
-      await gamesStore.setJSON(gameId, { gameId, roles, finalState: state });
+      if (Date.now() - startedAt > TIME_BUDGET_MS) break;
     }
 
-    // Save batch summary
-    await gamesStore.setJSON(`batch-${batchId}-${startIndex}`, { startIndex, count, completed: true });
+    // Hand off to a fresh invocation if there is more work and we are still the
+    // active run.
+    const control = await getControl();
+    if (control.status === 'running' && control.nextIndex < control.total) {
+      if (typeof runId !== 'number' || control.runId === runId) {
+        const baseUrl = resolveBaseUrl(event.headers as Record<string, string | undefined>);
+        await triggerOrchestrator(baseUrl, control.runId);
+      }
+    }
 
-    return { statusCode: 200, body: 'Batch completed' };
+    return { statusCode: 200, body: 'Batch chunk processed' };
   } catch (error: any) {
     console.error('Background batch error:', error);
+    try {
+      const control = await getControl();
+      // Surface the failure and stop in a resumable state rather than appearing
+      // to run forever with no chain in flight.
+      await setControl({ ...control, status: control.status === 'running' ? 'paused' : control.status, lastError: error.message });
+    } catch {
+      // ignore secondary failure
+    }
     return { statusCode: 500, body: error.message };
   }
 };
