@@ -1,5 +1,5 @@
 import type { ModelProvider, ActionAllocation } from './types';
-import { MODEL_NAMES } from './models';
+import { MODEL_NAMES, SAMPLING_TEMPERATURE } from './models';
 
 const AI_REQUEST_TIMEOUT_MS = 20000;
 
@@ -81,6 +81,7 @@ async function callOpenAI(prompt: string) {
   const config = getOpenAIConfig();
   const data = await postJson(`${config.baseUrl}/v1/chat/completions`, config, {
     model: MODEL_NAMES.openai,
+    temperature: SAMPLING_TEMPERATURE,
     messages: [
       {
         role: 'system',
@@ -104,6 +105,7 @@ async function callGemini(prompt: string) {
       },
     ],
     generationConfig: {
+      temperature: SAMPLING_TEMPERATURE,
       responseMimeType: 'application/json',
     },
   });
@@ -119,6 +121,7 @@ async function callClaude(prompt: string) {
     {
       model: MODEL_NAMES.claude,
       max_tokens: 1000,
+      temperature: SAMPLING_TEMPERATURE,
       messages: [{ role: 'user', content: `${prompt}\n\nOutput only valid JSON.` }],
     },
     { 'anthropic-version': '2023-06-01' },
