@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Download, FastForward, Play } from 'lucide-react';
 import type { GameState, GameConfig } from '../engine/types';
 import { exportToExcel } from '../utils/exportExcel';
@@ -17,9 +17,11 @@ const INITIAL_STATE: GameState = {
 };
 
 const Dashboard: React.FC = () => {
+  const TOTAL_BATCH_GAMES = 299;
   const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [backgroundProgress, setBackgroundProgress] = useState(0);
+  const [completedGames, setCompletedGames] = useState(0);
+  const [batchRunning, setBatchRunning] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
   const config: GameConfig = {
@@ -56,33 +58,54 @@ const Dashboard: React.FC = () => {
     }
   };
 
+  // Poll the real batch tracker while a run is active so the progress bar
+  // reflects how many games have actually been persisted, not a guess.
+  useEffect(() => {
+    if (!batchRunning) return;
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const res = await fetch('/.netlify/functions/batch-status');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!active) return;
+        setCompletedGames(data.completed ?? 0);
+        if (data.done) setBatchRunning(false);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [batchRunning]);
+
   const startBackgroundBatch = async () => {
-    const totalGames = 299;
+    const totalGames = TOTAL_BATCH_GAMES;
     const batchSize = 10;
     const numBatches = Math.ceil(totalGames / batchSize);
-    
+
     // We fire and forget them in chunks to Netlify background functions
     // Note: Netlify free tier might rate limit concurrent background functions,
     // so we will just fire them off. In a real production system we'd use a queue.
     for (let i = 0; i < numBatches; i++) {
       const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
       const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
+
       fetch('/.netlify/functions/batch-games-background', {
         method: 'POST',
         body: JSON.stringify({ batchId: 'main', startIndex, count })
       }).catch(console.error);
     }
-    
-    alert('Started 299 games in the background. Check back in a few minutes to download results.');
-    
-    // Mock progress bar
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 5;
-      setBackgroundProgress(Math.min(prog, 100));
-      if (prog >= 100) clearInterval(interval);
-    }, 10000);
+
+    // Kick off the real tracker — the polling effect takes over from here.
+    setCompletedGames(0);
+    setBatchRunning(true);
   };
 
   const handleDownload = async () => {
@@ -197,11 +220,18 @@ const Dashboard: React.FC = () => {
           </button>
         </div>
 
-        {backgroundProgress > 0 && (
+        {(batchRunning || completedGames > 0) && (
            <div style={{ marginTop: '1.5rem' }}>
-             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Background jobs initiated...</p>
+             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+               {batchRunning
+                 ? `Running… ${completedGames} / ${TOTAL_BATCH_GAMES} games completed`
+                 : `Run complete — ${completedGames} / ${TOTAL_BATCH_GAMES} games completed`}
+             </p>
              <div className="progress-bar">
-               <div className="progress-fill" style={{ width: `${backgroundProgress}%` }}></div>
+               <div
+                 className="progress-fill"
+                 style={{ width: `${Math.round((completedGames / TOTAL_BATCH_GAMES) * 100)}%` }}
+               ></div>
              </div>
            </div>
         )}
