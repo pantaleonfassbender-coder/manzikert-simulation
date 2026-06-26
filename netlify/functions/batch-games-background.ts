@@ -1,12 +1,29 @@
 import { Handler } from '@netlify/functions';
 import { getStore } from '@netlify/blobs';
-import { ActionAllocation, Faction, GameConfig } from '../../src/engine/types';
+import { ActionAllocation, Faction, GameConfig, ModelProvider } from '../../src/engine/types';
 import { createInitialState, resolveRound } from '../../src/engine/engine';
 import { generatePrompt } from '../../src/engine/prompts';
 import { callLLM } from '../../src/engine/llmClients';
 
 // Helper to delay
 const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+
+// Shared blob key that holds the run state. The dashboard flips this to
+// 'stopped' to halt an in-flight run; the background worker checks it before
+// starting each game and exits cleanly when asked to stop.
+const CONTROL_KEY = 'run-control';
+
+// Role rotation across the 300-game run, in three blocks of 100 so each model
+// plays every faction an equal number of times:
+//   games   1-100: emperor=openai, foes=gemini, seljuks=claude
+//   games 101-200: emperor=gemini, foes=claude, seljuks=openai
+//   games 201-300: emperor=claude, foes=openai, seljuks=gemini
+function rolesForIndex(gameIndex: number): Record<Faction, ModelProvider> {
+  const block = Math.floor((gameIndex - 1) / 100);
+  if (block === 1) return { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
+  if (block >= 2) return { emperor: 'claude', foes: 'openai', seljuks: 'gemini' };
+  return { emperor: 'openai', foes: 'gemini', seljuks: 'claude' };
+}
 
 // Deterministic fallback so a single transient LLM/gateway failure does not
 // abort an entire 10-game batch (which would persist nothing). Mirrors the
@@ -53,30 +70,31 @@ async function getFactionAction(provider: GameConfig['roles'][Faction], prompt: 
 
 export const handler: Handler = async (event) => {
   try {
-    const { batchId, startIndex, count }: { batchId: string, startIndex: number, count: number } = JSON.parse(event.body || '{}');
+    const { indices }: { indices: number[] } = JSON.parse(event.body || '{}');
 
-    if (!batchId) {
-      return { statusCode: 400, body: 'Missing batchId' };
+    if (!Array.isArray(indices) || indices.length === 0) {
+      return { statusCode: 400, body: 'Missing indices' };
     }
 
     const gamesStore = getStore('mantzikert-games');
-    const results = [];
 
-    for (let i = 0; i < count; i++) {
-      const gameIndex = startIndex + i;
+    for (const gameIndex of indices) {
       const gameId = `game-${gameIndex}`;
 
-      // Determine roles based on index (1-100, 101-200, 201-300)
-      // Since it's 0-indexed:
-      // 0-99: openai, gemini, claude
-      // 100-199: gemini, claude, openai
-      // 200-299: claude, openai, gemini
-      let roles: Record<Faction, any> = { emperor: 'openai', foes: 'gemini', seljuks: 'claude' };
-      if (gameIndex >= 100 && gameIndex < 200) {
-        roles = { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
-      } else if (gameIndex >= 200) {
-        roles = { emperor: 'claude', foes: 'openai', seljuks: 'gemini' };
+      // Honor a stop request issued from the dashboard mid-run. We re-read the
+      // flag before each game so stopping is responsive without abandoning a
+      // game that is already in progress.
+      const control = await gamesStore.get(CONTROL_KEY, { type: 'json' }) as { status?: string } | null;
+      if (control?.status === 'stopped') {
+        return { statusCode: 200, body: 'Run stopped' };
       }
+
+      // Resume safety: never recompute a game that is already persisted, so a
+      // resumed run only fills in the games that are actually missing.
+      const existing = await gamesStore.get(gameId);
+      if (existing) continue;
+
+      const roles = rolesForIndex(gameIndex);
 
       try {
         let state = createInitialState(gameId);
@@ -104,12 +122,6 @@ export const handler: Handler = async (event) => {
           await delay(500);
         }
 
-        results.push({
-          gameId,
-          roles,
-          finalState: state
-        });
-
         // Save completed game to blobs so the UI tracker and export see it
         await gamesStore.setJSON(gameId, { gameId, roles, finalState: state });
       } catch (gameError: any) {
@@ -117,9 +129,6 @@ export const handler: Handler = async (event) => {
         console.error(`Game ${gameId} failed and was skipped:`, gameError?.message || gameError);
       }
     }
-
-    // Save batch summary
-    await gamesStore.setJSON(`batch-${batchId}-${startIndex}`, { startIndex, count, completed: true });
 
     return { statusCode: 200, body: 'Batch completed' };
   } catch (error: any) {

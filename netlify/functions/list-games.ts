@@ -1,22 +1,13 @@
 import { Handler } from '@netlify/functions';
 import { getStore } from '@netlify/blobs';
 
-export const handler: Handler = async (event) => {
+export const handler: Handler = async () => {
   try {
     const gamesStore = getStore('mantzikert-games');
     const { blobs } = await gamesStore.list();
-    const gameBlobs = blobs.filter(b => b.key.startsWith('game-'));
-
-    // Lightweight tracker mode: return only the real count of persisted games
-    // without downloading every game's JSON.
-    const countOnly = event.queryStringParameters?.count === '1';
-    if (countOnly) {
-      return {
-        statusCode: 200,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count: gameBlobs.length })
-      };
-    }
+    // Only real batch games (game-<number>). This excludes the live spectator
+    // game and the run-control flag, so the export is purely the 300-game run.
+    const gameBlobs = blobs.filter(b => /^game-\d+$/.test(b.key));
 
     // Fetch all game data
     const games = await Promise.all(
