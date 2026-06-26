@@ -5,13 +5,18 @@ import { MODEL_NAMES } from '../engine/models';
 const getModelName = (provider?: ModelProvider) => provider ? MODEL_NAMES[provider] : 'unknown';
 
 export function exportToExcel(games: any[]) {
+  // Drop anything that hasn't produced a usable final state yet so a mid-run
+  // download (before every game has finished) still exports cleanly.
+  const usable = (games || []).filter((g) => g && g.finalState && g.finalState.factions);
+
   // Sheet 1: Game Summaries
-  const summaries = games.map(g => ({
+  const summaries = usable.map(g => ({
     GameID: g.gameId,
     EmperorModel: getModelName(g.roles?.emperor),
     FoesModel: getModelName(g.roles?.foes),
     SeljuksModel: getModelName(g.roles?.seljuks),
     Winner: g.finalState.winner || 'none',
+    Rounds: g.finalState.history?.length ?? 0,
     FinalEmperorLoyalty: g.finalState.factions.emperor.internalLoyalty,
     FinalEmperorTerritory: g.finalState.factions.emperor.territoryControl
   }));
@@ -20,7 +25,7 @@ export function exportToExcel(games: any[]) {
   const roundData: any[] = [];
   const selfAssessments: any[] = [];
 
-  games.forEach(g => {
+  usable.forEach(g => {
     const history = g.finalState?.history || [];
     history.forEach((r: RoundRecord) => {
       roundData.push({

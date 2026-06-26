@@ -1,7 +1,58 @@
 import type { ModelProvider, ActionAllocation } from './types';
 import { MODEL_NAMES } from './models';
 
-const AI_REQUEST_TIMEOUT_MS = 20000;
+const AI_REQUEST_TIMEOUT_MS = 30000;
+
+// Retry tuning. Rate limits (429) on the Netlify AI Gateway are scoped per
+// account across the whole token-per-minute window, so when many rounds fire
+// at once the gateway pushes back. We retry transient failures with an
+// exponential backoff plus jitter rather than letting a single 429 abort a
+// game. This is the main guard that keeps large batch runs from collapsing.
+const MAX_ATTEMPTS = 5;
+const BASE_BACKOFF_MS = 1200;
+const MAX_BACKOFF_MS = 20000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isRetryableError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+    return true;
+  }
+  return (
+    message.includes('429') ||
+    message.includes('rate limit') ||
+    message.includes('overloaded') ||
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('aborted') ||
+    message.includes('econnreset') ||
+    message.includes('fetch failed') ||
+    message.includes('500') ||
+    message.includes('502') ||
+    message.includes('503') ||
+    message.includes('504')
+  );
+}
+
+async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableError(error) || attempt === MAX_ATTEMPTS - 1) {
+        throw error;
+      }
+      const backoff = Math.min(BASE_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
+      const jitter = Math.floor(Math.random() * 400);
+      console.warn(`Retrying ${label} after transient error (attempt ${attempt + 1}/${MAX_ATTEMPTS}); waiting ${backoff + jitter}ms.`);
+      await sleep(backoff + jitter);
+    }
+  }
+  throw lastError;
+}
 
 type JsonValue = Record<string, any>;
 type ProviderConfig = {
@@ -134,13 +185,13 @@ export async function callLLM(provider: ModelProvider, prompt: string): Promise<
 
   try {
     if (provider === 'openai') {
-      rawJson = await callOpenAI(prompt);
+      rawJson = await withRetry(() => callOpenAI(prompt), 'openai');
     }
     else if (provider === 'gemini') {
-      rawJson = await callGemini(prompt);
+      rawJson = await withRetry(() => callGemini(prompt), 'gemini');
     }
     else if (provider === 'claude') {
-      rawJson = await callClaude(prompt);
+      rawJson = await withRetry(() => callClaude(prompt), 'claude');
     }
 
     // Try extracting JSON if wrapped in markdown
