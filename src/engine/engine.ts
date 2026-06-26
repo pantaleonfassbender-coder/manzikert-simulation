@@ -66,12 +66,14 @@ export function resolveRound(state: GameState, allocations: Record<Faction, Acti
     }
   }
 
-  // Save the round record
+  // Save the round record. Note: we intentionally do not snapshot the full
+  // state here — doing so nested every prior round's snapshot and grew the
+  // payload exponentially (~9MB by round 12), blowing past the function
+  // request/response size limit and breaking later rounds.
   const record: RoundRecord = {
     round: nextState.currentRound,
     allocations,
     events,
-    stateAfter: JSON.parse(JSON.stringify(nextState)),
   };
   
   nextState.history.push(record);

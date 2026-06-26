@@ -19,7 +19,6 @@ export interface RoundRecord {
   round: number;
   allocations: Record<Faction, ActionAllocation>;
   events: string[];
-  stateAfter: GameState;
 }
 
 export interface GameState {
