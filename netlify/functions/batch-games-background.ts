@@ -16,7 +16,19 @@ export const handler: Handler = async (event) => {
       return { statusCode: 400, body: 'Missing batchId' };
     }
 
-    const gamesStore = getStore('mantzikert-games');
+    const gamesStore = getStore({ name: 'mantzikert-games', consistency: 'strong' });
+    const now = new Date().toISOString();
+    const runKey = `batch-run-${batchId}`;
+    const existingRun = await gamesStore.get(runKey, { type: 'json' }) as Record<string, unknown> | null;
+    await gamesStore.setJSON(runKey, {
+      batchId,
+      totalGames: 299,
+      status: 'running',
+      startedAt: existingRun?.startedAt || now,
+      updatedAt: now,
+      lastStartedIndex: startIndex,
+    });
+
     const results = [];
 
     for (let i = 0; i < count; i++) {
@@ -68,6 +80,14 @@ export const handler: Handler = async (event) => {
       
       // Save intermediate to blobs so UI can see progress
       await gamesStore.setJSON(gameId, { gameId, roles, finalState: state });
+      await gamesStore.setJSON(runKey, {
+        batchId,
+        totalGames: 299,
+        status: 'running',
+        startedAt: existingRun?.startedAt || now,
+        updatedAt: new Date().toISOString(),
+        lastCompletedGameId: gameId,
+      });
     }
 
     // Save batch summary
