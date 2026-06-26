@@ -1,16 +1,16 @@
 import { Handler } from '@netlify/functions';
-import { getStore } from '@netlify/blobs';
+import { getGamesStore } from '../lib/games-store';
 
 export const handler: Handler = async () => {
   try {
-    const gamesStore = getStore('mantzikert-games');
+    const gamesStore = getGamesStore();
     const { blobs } = await gamesStore.list();
     
     // Fetch all game data
     const games = await Promise.all(
       blobs
         .filter(b => b.key.startsWith('game-'))
-        .map(async (b) => await gamesStore.getJSON(b.key))
+        .map(async (b) => await gamesStore.get(b.key, { type: 'json' }))
     );
 
     return {

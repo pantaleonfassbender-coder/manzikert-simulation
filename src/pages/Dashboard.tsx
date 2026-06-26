@@ -60,20 +60,31 @@ const Dashboard: React.FC = () => {
     const totalGames = 299;
     const batchSize = 10;
     const numBatches = Math.ceil(totalGames / batchSize);
-    
-    // We fire and forget them in chunks to Netlify background functions
-    // Note: Netlify free tier might rate limit concurrent background functions,
-    // so we will just fire them off. In a real production system we'd use a queue.
-    for (let i = 0; i < numBatches; i++) {
-      const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
-      const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
-      fetch('/.netlify/functions/batch-games-background', {
-        method: 'POST',
-        body: JSON.stringify({ batchId: 'main', startIndex, count })
-      }).catch(console.error);
+
+    try {
+      const batchRequests = Array.from({ length: numBatches }, (_, i) => {
+        const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
+        const count = Math.min(batchSize, totalGames - (startIndex - 1));
+
+        return fetch('/.netlify/functions/batch-games-background', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batchId: 'main', startIndex, count })
+        });
+      });
+
+      const responses = await Promise.all(batchRequests);
+      const failedResponses = responses.filter((response) => !response.ok);
+
+      if (failedResponses.length > 0) {
+        throw new Error(`${failedResponses.length} batch requests were not accepted`);
+      }
+    } catch (error) {
+      console.error('Failed to start background games:', error);
+      alert('Failed to start background games');
+      return;
     }
-    
+
     alert('Started 299 games in the background. Check back in a few minutes to download results.');
     
     // Mock progress bar
