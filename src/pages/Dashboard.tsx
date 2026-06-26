@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Download, FastForward, Play } from 'lucide-react';
 import type { GameState, GameConfig } from '../engine/types';
 import { exportToExcel } from '../utils/exportExcel';
@@ -20,12 +20,48 @@ const Dashboard: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
   const [isPlaying, setIsPlaying] = useState(false);
   const [backgroundProgress, setBackgroundProgress] = useState(0);
+  const [completedBackgroundGames, setCompletedBackgroundGames] = useState(0);
+  const [isBatchRunning, setIsBatchRunning] = useState(false);
+  const [batchStatus, setBatchStatus] = useState('Ready to launch background games.');
   const [downloading, setDownloading] = useState(false);
+  const progressPollRef = useRef<number | null>(null);
 
   const config: GameConfig = {
     gameId: 'game-spectator',
     roles: { emperor: 'openai', foes: 'gemini', seljuks: 'claude' }
   };
+
+  const refreshBackgroundProgress = async () => {
+    const res = await fetch('/.netlify/functions/list-games');
+    if (!res.ok) {
+      throw new Error(`Progress request failed with status ${res.status}`);
+    }
+
+    const data = await res.json();
+    const completed = Array.isArray(data.games) ? data.games.length : 0;
+
+    setCompletedBackgroundGames(completed);
+    setBackgroundProgress(Math.min(Math.round((completed / 299) * 100), 100));
+
+    if (completed >= 299) {
+      setBatchStatus('All 299 background games completed.');
+      setIsBatchRunning(false);
+      if (progressPollRef.current) {
+        window.clearInterval(progressPollRef.current);
+        progressPollRef.current = null;
+      }
+    } else {
+      setBatchStatus(`Running background games: ${completed} of 299 completed.`);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (progressPollRef.current) {
+        window.clearInterval(progressPollRef.current);
+      }
+    };
+  }, []);
 
   const playNextRound = async () => {
     if (gameState.currentRound > 12 || isPlaying) return;
@@ -57,32 +93,57 @@ const Dashboard: React.FC = () => {
   };
 
   const startBackgroundBatch = async () => {
+    if (isBatchRunning) return;
+
     const totalGames = 299;
     const batchSize = 10;
     const numBatches = Math.ceil(totalGames / batchSize);
-    
-    // We fire and forget them in chunks to Netlify background functions
-    // Note: Netlify free tier might rate limit concurrent background functions,
-    // so we will just fire them off. In a real production system we'd use a queue.
-    for (let i = 0; i < numBatches; i++) {
-      const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
-      const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
-      fetch('/.netlify/functions/batch-games-background', {
-        method: 'POST',
-        body: JSON.stringify({ batchId: 'main', startIndex, count })
-      }).catch(console.error);
+
+    setIsBatchRunning(true);
+    setBatchStatus('Launching background game batches...');
+    setCompletedBackgroundGames(0);
+    setBackgroundProgress(0);
+
+    try {
+      const launches = [];
+
+      for (let i = 0; i < numBatches; i++) {
+        const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
+        const count = Math.min(batchSize, totalGames - (startIndex - 1));
+
+        launches.push(fetch('/.netlify/functions/batch-games-background', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batchId: 'main', startIndex, count })
+        }));
+      }
+
+      const responses = await Promise.allSettled(launches);
+      const failedLaunches = responses.filter((result) => result.status === 'rejected' || !result.value.ok).length;
+
+      setBatchStatus(
+        failedLaunches > 0
+          ? `${numBatches - failedLaunches} of ${numBatches} batches launched. Tracking completed games.`
+          : 'All batches launched. Tracking completed games.'
+      );
+
+      await refreshBackgroundProgress();
+
+      if (progressPollRef.current) {
+        window.clearInterval(progressPollRef.current);
+      }
+
+      progressPollRef.current = window.setInterval(() => {
+        refreshBackgroundProgress().catch((error) => {
+          console.error(error);
+          setBatchStatus('Progress check failed. Download may still become available after background jobs finish.');
+        });
+      }, 5000);
+    } catch (e) {
+      console.error(e);
+      setBatchStatus('Failed to launch background games.');
+      setIsBatchRunning(false);
     }
-    
-    alert('Started 299 games in the background. Check back in a few minutes to download results.');
-    
-    // Mock progress bar
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 5;
-      setBackgroundProgress(Math.min(prog, 100));
-      if (prog >= 100) clearInterval(interval);
-    }, 10000);
   };
 
   const handleDownload = async () => {
@@ -186,9 +247,9 @@ const Dashboard: React.FC = () => {
         <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the remaining 299 games in the background and export all data to Excel.</p>
         
         <div style={{ display: 'flex', gap: '1rem' }}>
-          <button className="btn btn-primary" onClick={startBackgroundBatch}>
+          <button className="btn btn-primary" onClick={startBackgroundBatch} disabled={isBatchRunning}>
             <FastForward size={18} style={{ marginRight: '0.5rem' }} /> 
-            Start 299 Background Games
+            {isBatchRunning ? 'Launching Games...' : 'Start 299 Background Games'}
           </button>
 
           <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={handleDownload} disabled={downloading}>
@@ -197,9 +258,11 @@ const Dashboard: React.FC = () => {
           </button>
         </div>
 
-        {backgroundProgress > 0 && (
+        {(backgroundProgress > 0 || isBatchRunning) && (
            <div style={{ marginTop: '1.5rem' }}>
-             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Background jobs initiated...</p>
+             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+               {batchStatus} {completedBackgroundGames} / 299 games stored.
+             </p>
              <div className="progress-bar">
                <div className="progress-fill" style={{ width: `${backgroundProgress}%` }}></div>
              </div>
