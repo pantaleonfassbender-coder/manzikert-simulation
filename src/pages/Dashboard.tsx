@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Download, FastForward, Play } from 'lucide-react';
 import type { GameState, GameConfig } from '../engine/types';
 import { exportToExcel } from '../utils/exportExcel';
@@ -16,16 +16,45 @@ const INITIAL_STATE: GameState = {
   winner: null,
 };
 
+const TOTAL_BACKGROUND_GAMES = 299;
+
 const Dashboard: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [backgroundProgress, setBackgroundProgress] = useState(0);
+  const [completedCount, setCompletedCount] = useState(0);
+  const [tracking, setTracking] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const config: GameConfig = {
     gameId: 'game-spectator',
     roles: { emperor: 'openai', foes: 'gemini', seljuks: 'claude' }
   };
+
+  // Poll the real number of completed games persisted to storage, so the
+  // tracker reflects actual progress instead of a fabricated bar.
+  const fetchCompletedCount = async () => {
+    try {
+      const res = await fetch('/.netlify/functions/list-games?count=1');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (typeof data.count === 'number') setCompletedCount(data.count);
+    } catch (e) {
+      console.error('Failed to fetch completed game count', e);
+    }
+  };
+
+  useEffect(() => {
+    fetchCompletedCount();
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  const backgroundProgress = Math.min(
+    100,
+    Math.round((completedCount / TOTAL_BACKGROUND_GAMES) * 100)
+  );
 
   const playNextRound = async () => {
     if (gameState.currentRound > 12 || isPlaying) return;
@@ -57,48 +86,69 @@ const Dashboard: React.FC = () => {
   };
 
   const startBackgroundBatch = async () => {
-    const totalGames = 299;
+    const totalGames = TOTAL_BACKGROUND_GAMES;
     const batchSize = 10;
     const numBatches = Math.ceil(totalGames / batchSize);
-    
+
     // We fire and forget them in chunks to Netlify background functions
     // Note: Netlify free tier might rate limit concurrent background functions,
     // so we will just fire them off. In a real production system we'd use a queue.
     for (let i = 0; i < numBatches; i++) {
       const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
       const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
+
       fetch('/.netlify/functions/batch-games-background', {
         method: 'POST',
         body: JSON.stringify({ batchId: 'main', startIndex, count })
       }).catch(console.error);
     }
-    
+
     alert('Started 299 games in the background. Check back in a few minutes to download results.');
-    
-    // Mock progress bar
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 5;
-      setBackgroundProgress(Math.min(prog, 100));
-      if (prog >= 100) clearInterval(interval);
+
+    // Poll storage for the real number of completed games so the tracker
+    // stays in sync with what is actually persisted and exportable.
+    setTracking(true);
+    fetchCompletedCount();
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      await fetchCompletedCount();
     }, 10000);
   };
+
+  // Stop polling once every game has been persisted.
+  useEffect(() => {
+    if (completedCount >= TOTAL_BACKGROUND_GAMES && pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, [completedCount]);
 
   const handleDownload = async () => {
     setDownloading(true);
     try {
       const res = await fetch('/.netlify/functions/list-games');
       const data = await res.json();
-      
-      // Merge spectator game with background games
+
+      // Merge the spectator game with the background games, then keep only games
+      // that have actually been played (the spectator game starts empty).
       const allGames = [{ gameId: 'game-0', roles: config.roles, finalState: gameState }, ...(data.games || [])];
-      exportToExcel(allGames);
+      const completedGames = allGames.filter(g => (g.finalState?.history?.length ?? 0) > 0);
+
+      // Refresh the tracker with the authoritative count from storage.
+      setCompletedCount((data.games || []).length);
+
+      if (completedGames.length === 0) {
+        alert('No completed games to export yet. Start the batch run or play the demo first.');
+        return;
+      }
+
+      exportToExcel(completedGames);
     } catch (e) {
       console.error(e);
       alert('Failed to download excel');
+    } finally {
+      setDownloading(false);
     }
-    setDownloading(false);
   };
 
   return (
@@ -197,9 +247,11 @@ const Dashboard: React.FC = () => {
           </button>
         </div>
 
-        {backgroundProgress > 0 && (
+        {(tracking || completedCount > 0) && (
            <div style={{ marginTop: '1.5rem' }}>
-             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Background jobs initiated...</p>
+             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+               {completedCount} / {TOTAL_BACKGROUND_GAMES} games completed and saved.
+             </p>
              <div className="progress-bar">
                <div className="progress-fill" style={{ width: `${backgroundProgress}%` }}></div>
              </div>
