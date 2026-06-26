@@ -13,9 +13,9 @@ function newRunId(previous: number): number {
 }
 
 // Manages the 300-game run's control record only. The run itself is advanced by
-// the authenticated browser calling batch-advance round by round, so there is no
-// server-to-server invocation here (which the site's password protection would
-// block).
+// the batch-run-background function (a 15-minute background worker) that the
+// authenticated browser triggers, so there is no server-to-server invocation
+// here (which the site's password protection would block).
 export const handler: Handler = async (event) => {
   try {
     const params = event.queryStringParameters || {};

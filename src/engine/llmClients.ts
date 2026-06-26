@@ -17,6 +17,44 @@ const MAX_BACKOFF_MS = 20000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Models do not reliably return a bare JSON object even when asked to: Gemini in
+// particular tends to wrap it in prose or append a second fragment, which made
+// JSON.parse throw and silently drop that faction to a canned fallback move
+// every round. Pull out the first brace-balanced object (respecting strings and
+// escapes) so leading/trailing text no longer breaks parsing.
+function extractFirstJsonObject(raw: string): string {
+  const start = raw.indexOf('{');
+  if (start === -1) return raw;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return raw.slice(start, i + 1);
+    }
+  }
+  // Unbalanced (e.g. the response was truncated): return from the first brace so
+  // the caller's JSON.parse surfaces a clear error and the retry/fallback runs.
+  return raw.slice(start);
+}
+
 function isRetryableError(error: unknown): boolean {
   const status = (error as { status?: number })?.status;
   if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
@@ -128,7 +166,10 @@ async function callGemini(prompt: string): Promise<string> {
   const response = await geminiClient().models.generateContent({
     model: MODEL_NAMES.gemini,
     contents: prompt,
-    config: { responseMimeType: 'application/json', maxOutputTokens: 1500 },
+    // A generous output budget: this is a reasoning model whose internal
+    // thinking can count against the cap, and a too-small limit truncated the
+    // JSON mid-object (so the move failed to parse and fell back to a default).
+    config: { responseMimeType: 'application/json', maxOutputTokens: 4096 },
   });
   return response.text || '{}';
 }
@@ -136,7 +177,7 @@ async function callGemini(prompt: string): Promise<string> {
 async function callClaude(prompt: string): Promise<string> {
   const message = await anthropicClient().messages.create({
     model: MODEL_NAMES.claude,
-    max_tokens: 1500,
+    max_tokens: 2048,
     messages: [{ role: 'user', content: `${prompt}\n\nOutput only valid JSON.` }],
   });
   return message.content
@@ -156,8 +197,10 @@ export async function callLLM(provider: ModelProvider, prompt: string): Promise<
       rawJson = await withRetry(() => callClaude(prompt), 'claude');
     }
 
-    // Strip any markdown fencing the model may add before parsing.
+    // Strip any markdown fencing, then isolate the first complete JSON object so
+    // surrounding prose or a trailing fragment can't break the parse.
     rawJson = rawJson.replace(/```json\n?|\n?```/g, '').trim();
+    rawJson = extractFirstJsonObject(rawJson);
     const parsed = JSON.parse(rawJson);
 
     // Normalize and validate the three allocation channels.

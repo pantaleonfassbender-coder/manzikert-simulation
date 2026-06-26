@@ -20,6 +20,11 @@ export interface BatchControl {
   blockSize: number;
   updatedAt: number;
   lastError: string | null;
+  // Wall-clock time the background worker last made progress. The browser uses
+  // it to tell a live worker from a dead/finished one: while it keeps advancing
+  // nothing needs doing, but once it goes stale (worker hit its time limit,
+  // crashed, or the page was reopened) the dashboard re-triggers a fresh worker.
+  heartbeat: number | null;
   // The in-progress game's state, persisted between round advances so a run can
   // be paused, resumed, or recovered after a reload without losing its place.
   // Null while between games.
@@ -35,6 +40,7 @@ export function defaultControl(): BatchControl {
     blockSize: DEFAULT_BLOCK_SIZE,
     updatedAt: Date.now(),
     lastError: null,
+    heartbeat: null,
     currentGame: null,
   };
 }

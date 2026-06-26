@@ -13,7 +13,16 @@ interface BatchControl {
   nextIndex: number;
   runId: number;
   lastError: string | null;
+  heartbeat: number | null;
 }
+
+// The run is processed by a background function. If its heartbeat is older than
+// this while the run is still "running", the worker has finished its time
+// budget, crashed, or never started — so the dashboard kicks off a fresh one.
+const WORKER_STALE_MS = 30_000;
+// Don't re-trigger more than once per this window, so a burst of polls can't
+// spawn a pile of workers.
+const RETRIGGER_COOLDOWN_MS = 15_000;
 
 const Dashboard: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(() => createInitialState(SPECTATOR_ID));
@@ -103,10 +112,9 @@ const Dashboard: React.FC = () => {
 
   // ---- Batch run ------------------------------------------------------------
 
-  // Guards so only one browser-driven advance loop runs per tab, and so a loop
-  // can tell when it has been superseded by a newer run (Start/Reset bump runId).
-  const drivingRef = useRef(false);
-  const runIdRef = useRef<number>(0);
+  // Last time this tab asked the background worker to (re)start, so polling
+  // can't spawn a stack of workers.
+  const lastTriggerRef = useRef<number>(0);
 
   const refreshBatchStatus = useCallback(async () => {
     try {
@@ -120,59 +128,15 @@ const Dashboard: React.FC = () => {
     }
   }, []);
 
-  // Drives the 300-game run forward by repeatedly asking the server to play one
-  // round of the current game. The browser is already authenticated, so unlike a
-  // server-side self-invocation these calls are never blocked by the site's
-  // password protection. The loop stops as soon as the run is paused/finished or
-  // a newer run supersedes this one.
-  const driveBatch = useCallback(async (runId: number) => {
-    if (drivingRef.current) return; // a loop is already running in this tab
-    drivingRef.current = true;
-    runIdRef.current = runId;
-
-    let consecutiveErrors = 0;
-    try {
-      while (drivingRef.current && runIdRef.current === runId) {
-        try {
-          const res = await fetch('/.netlify/functions/batch-advance', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runId }),
-          });
-          if (!res.ok) throw new Error(`advance failed with status ${res.status}`);
-          const data = await res.json();
-          consecutiveErrors = 0;
-          if (data.control) setBatch(data.control);
-          if (!data.control || data.control.status !== 'running' || data.control.runId !== runId) {
-            break;
-          }
-        } catch (e) {
-          // Transient failure (e.g. a slow round hitting the function time
-          // limit). The last completed round is already persisted, so back off
-          // briefly and retry; give up after several straight failures.
-          console.error('batch advance error', e);
-          if (++consecutiveErrors >= 6) {
-            // Too many straight failures: pause so the run can be resumed later
-            // rather than spinning. Pause directly to avoid hammering on.
-            try {
-              const res = await fetch('/.netlify/functions/batch-control', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'pause' }),
-              });
-              const data = await res.json();
-              if (data.control) setBatch(data.control);
-            } catch {
-              /* ignore */
-            }
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 2000 * consecutiveErrors));
-        }
-      }
-    } finally {
-      if (runIdRef.current === runId) drivingRef.current = false;
-    }
+  // Kicks off the background worker that actually plays the games. The browser is
+  // already past the site's password screen, so unlike a server-to-server call
+  // this request reaches the function. The worker returns 202 immediately and
+  // keeps running on its own; we just need to fire it.
+  const triggerWorker = useCallback(() => {
+    lastTriggerRef.current = Date.now();
+    fetch('/.netlify/functions/batch-run-background', { method: 'POST' }).catch((e) => {
+      console.error('Failed to trigger batch worker', e);
+    });
   }, []);
 
   const sendBatchAction = useCallback(async (action: 'start' | 'pause' | 'resume' | 'reset') => {
@@ -185,32 +149,30 @@ const Dashboard: React.FC = () => {
       const data = await res.json();
       if (data.control) {
         setBatch(data.control);
-        if (action === 'start' || action === 'resume') {
-          if (data.control.status === 'running') {
-            drivingRef.current = false; // release any prior loop before starting
-            driveBatch(data.control.runId);
-          }
-        } else {
-          // pause / reset: stop this tab's driver.
-          drivingRef.current = false;
-          runIdRef.current = data.control.runId;
+        // Start/Resume flip the run to "running"; launch the worker to drive it.
+        if ((action === 'start' || action === 'resume') && data.control.status === 'running') {
+          triggerWorker();
         }
       }
     } catch (e) {
       console.error(e);
       alert(`Failed to ${action} the batch run`);
     }
-  }, [driveBatch]);
+  }, [triggerWorker]);
 
-  // Poll while a run is active so progress and pause/resume stay in sync. If a
-  // run is already "running" (e.g. after a page reload) and nothing is driving
-  // it in this tab, pick the work back up automatically.
+  // Poll while a run is active so progress and pause/resume stay in sync. If the
+  // run says "running" but the worker's heartbeat has gone stale (it hit its time
+  // budget, crashed, or the page was just reopened), start a fresh worker to
+  // carry on from wherever it last saved.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       const control = await refreshBatchStatus();
-      if (!cancelled && control?.status === 'running' && !drivingRef.current) {
-        driveBatch(control.runId);
+      if (cancelled || !control) return;
+      if (control.status === 'running') {
+        const stale = !control.heartbeat || Date.now() - control.heartbeat > WORKER_STALE_MS;
+        const cooledDown = Date.now() - lastTriggerRef.current > RETRIGGER_COOLDOWN_MS;
+        if (stale && cooledDown) triggerWorker();
       }
     };
     tick();
@@ -219,7 +181,7 @@ const Dashboard: React.FC = () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [refreshBatchStatus, driveBatch]);
+  }, [refreshBatchStatus, triggerWorker]);
 
   const handleDownload = async () => {
     setDownloading(true);
