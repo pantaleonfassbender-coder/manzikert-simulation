@@ -105,9 +105,18 @@ export const handler: Handler = async (event) => {
       }
       const url = selfInvokeUrl(event);
       if (url) {
+        // The self-invoke goes back through the public URL, so it passes through
+        // the site-wide Basic Auth edge gate. When SITE_PASSWORD is set, attach
+        // the same credential so the chain isn't rejected and the run can
+        // continue across batches.
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        const sitePassword = process.env.SITE_PASSWORD;
+        if (sitePassword) {
+          headers['Authorization'] = `Basic ${Buffer.from(`:${sitePassword}`).toString('base64')}`;
+        }
         await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ startIndex: end, chunkSize, total }),
         }).catch((e) => console.error('Failed to chain next batch:', e));
       } else {
