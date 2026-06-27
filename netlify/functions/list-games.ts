@@ -1,16 +1,18 @@
 import { Handler } from '@netlify/functions';
 import { getStore } from '@netlify/blobs';
+import { isAuthed, unauthorized } from '../../src/server/auth';
 
-export const handler: Handler = async () => {
+export const handler: Handler = async (event) => {
+  if (!isAuthed(event)) return unauthorized();
   try {
     const gamesStore = getStore('mantzikert-games');
     const { blobs } = await gamesStore.list();
     
-    // Fetch all game data
+    // Fetch all game data. Blobs exposes get(key, { type: 'json' }); there is no getJSON.
     const games = await Promise.all(
       blobs
-        .filter(b => b.key.startsWith('game-'))
-        .map(async (b) => await gamesStore.getJSON(b.key))
+        .filter(b => /^game-\d+$/.test(b.key))
+        .map(async (b) => await gamesStore.get(b.key, { type: 'json' }))
     );
 
     return {

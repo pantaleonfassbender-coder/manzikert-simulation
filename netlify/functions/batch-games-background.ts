@@ -1,40 +1,57 @@
 import { Handler } from '@netlify/functions';
 import { getStore } from '@netlify/blobs';
-import { Faction } from '../../src/engine/types';
+import { Faction, ModelProvider } from '../../src/engine/types';
 import { createInitialState, resolveRound } from '../../src/engine/engine';
 import { generatePrompt } from '../../src/engine/prompts';
 import { callLLM } from '../../src/engine/llmClients';
+import { isAuthed, unauthorized } from '../../src/server/auth';
+
+const CONTROL_KEY = 'run';
 
 // Helper to delay
-const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+const delay = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
+// Role assignment is purely a function of the game index, so the 300-game run is
+// fully self-contained and reproducible regardless of any live/spectator game.
+//   0-99   : openai / gemini / claude
+//   100-199: gemini / claude / openai
+//   200-299: claude / openai / gemini
+function rolesForIndex(gameIndex: number): Record<Faction, ModelProvider> {
+  if (gameIndex >= 200) return { emperor: 'claude', foes: 'openai', seljuks: 'gemini' };
+  if (gameIndex >= 100) return { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
+  return { emperor: 'openai', foes: 'gemini', seljuks: 'claude' };
+}
 
 export const handler: Handler = async (event) => {
-  try {
-    const { batchId, startIndex, count }: { batchId: string, startIndex: number, count: number } = JSON.parse(event.body || '{}');
+  if (!isAuthed(event)) return unauthorized();
 
-    if (!batchId) {
-      return { statusCode: 400, body: 'Missing batchId' };
+  try {
+    const { startIndex, count }: { startIndex: number; count: number } = JSON.parse(event.body || '{}');
+
+    if (typeof startIndex !== 'number' || typeof count !== 'number') {
+      return { statusCode: 400, body: 'Missing startIndex or count' };
     }
 
     const gamesStore = getStore('mantzikert-games');
-    const results = [];
+    const controlStore = getStore('mantzikert-control');
 
     for (let i = 0; i < count; i++) {
       const gameIndex = startIndex + i;
       const gameId = `game-${gameIndex}`;
-      
-      // Determine roles based on index (1-100, 101-200, 201-300)
-      // Since it's 0-indexed:
-      // 0-99: openai, gemini, claude
-      // 100-199: gemini, claude, openai
-      // 200-299: claude, openai, gemini
-      let roles: Record<Faction, any> = { emperor: 'openai', foes: 'gemini', seljuks: 'claude' };
-      if (gameIndex >= 100 && gameIndex < 200) {
-        roles = { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
-      } else if (gameIndex >= 200) {
-        roles = { emperor: 'claude', foes: 'openai', seljuks: 'gemini' };
+
+      // Honour the stop signal between games so the run can be paused and resumed.
+      const control = (await controlStore.get(CONTROL_KEY, { type: 'json' })) as
+        | { status?: string; stopRequested?: boolean }
+        | null;
+      if (control?.stopRequested || control?.status === 'paused') {
+        return { statusCode: 200, body: 'Stopped by control flag' };
       }
 
+      // Skip games that already finished — this makes resume idempotent.
+      const existing = await gamesStore.get(gameId);
+      if (existing) continue;
+
+      const roles = rolesForIndex(gameIndex);
       let state = createInitialState(gameId);
 
       for (let round = 1; round <= 12; round++) {
@@ -47,31 +64,21 @@ export const handler: Handler = async (event) => {
         const [emperorAction, foesAction, seljuksAction] = await Promise.all([
           callLLM(roles.emperor, emperorPrompt),
           callLLM(roles.foes, foesPrompt),
-          callLLM(roles.seljuks, seljuksPrompt)
+          callLLM(roles.seljuks, seljuksPrompt),
         ]);
 
         state = resolveRound(state, {
           emperor: emperorAction,
           foes: foesAction,
-          seljuks: seljuksAction
+          seljuks: seljuksAction,
         });
 
         // Small delay to respect rate limits
         await delay(500);
       }
 
-      results.push({
-        gameId,
-        roles,
-        finalState: state
-      });
-      
-      // Save intermediate to blobs so UI can see progress
       await gamesStore.setJSON(gameId, { gameId, roles, finalState: state });
     }
-
-    // Save batch summary
-    await gamesStore.setJSON(`batch-${batchId}-${startIndex}`, { startIndex, count, completed: true });
 
     return { statusCode: 200, body: 'Batch completed' };
   } catch (error: any) {

@@ -152,14 +152,16 @@ export async function callLLM(provider: ModelProvider, prompt: string): Promise<
     let diplomacy = Number(parsed.diplomacy) || 0;
     let internal = Number(parsed.internal) || 0;
     
-    // Auto-balance if they don't add to 100
+    // Normalize to 100 if the model returned proportions that don't sum to 100.
+    // If nothing usable came back, fail loudly rather than inventing numbers.
     const total = military + diplomacy + internal;
-    if (total !== 100 && total > 0) {
+    if (total <= 0) {
+      throw new Error(`${provider} returned no usable allocation (military/diplomacy/internal all zero).`);
+    }
+    if (total !== 100) {
       military = Math.round((military / total) * 100);
       diplomacy = Math.round((diplomacy / total) * 100);
       internal = 100 - military - diplomacy;
-    } else if (total === 0) {
-      military = 34; diplomacy = 33; internal = 33;
     }
 
     return {
