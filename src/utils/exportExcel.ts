@@ -5,8 +5,15 @@ import { MODEL_NAMES } from '../engine/models';
 const getModelName = (provider?: ModelProvider) => provider ? MODEL_NAMES[provider] : 'unknown';
 
 export function exportToExcel(games: any[]) {
+  // Order games by their numeric index (game-0, game-1, …) for a stable export.
+  const gameIndex = (id: string) => {
+    const match = /game-(\d+)/.exec(id || '');
+    return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+  };
+  const ordered = [...games].sort((a, b) => gameIndex(a.gameId) - gameIndex(b.gameId));
+
   // Sheet 1: Game Summaries
-  const summaries = games.map(g => ({
+  const summaries = ordered.map(g => ({
     GameID: g.gameId,
     EmperorModel: getModelName(g.roles?.emperor),
     FoesModel: getModelName(g.roles?.foes),
@@ -20,7 +27,7 @@ export function exportToExcel(games: any[]) {
   const roundData: any[] = [];
   const selfAssessments: any[] = [];
 
-  games.forEach(g => {
+  ordered.forEach(g => {
     const history = g.finalState?.history || [];
     history.forEach((r: RoundRecord) => {
       roundData.push({
