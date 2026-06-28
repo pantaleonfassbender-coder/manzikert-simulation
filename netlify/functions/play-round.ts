@@ -57,6 +57,10 @@ export const handler: Handler = async (event) => {
   } catch (error: any) {
     console.error('Error in play-round:', error);
     // 502: an upstream model call failed. The client should retry the round.
-    return { statusCode: 502, body: JSON.stringify({ error: error.message }) };
+    return {
+      statusCode: 502,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: error.message }),
+    };
   }
 };
