@@ -1,3 +1,6 @@
+import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import type { ModelProvider, ActionAllocation } from './types';
 import { MODEL_NAMES } from './models';
 
@@ -8,16 +11,33 @@ const AI_REQUEST_TIMEOUT_MS = 20000;
 // (see batch-games-background.ts) — per preregistration Q6.
 const MAX_LLM_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = 750;
+// The SDKs do their own retrying; we disable it so MAX_LLM_ATTEMPTS is the
+// single, authoritative retry budget for a call.
+const SDK_MAX_RETRIES = 0;
 
 const delay = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
-type JsonValue = Record<string, any>;
-type ProviderConfig = {
-  baseUrl: string;
-  headers: HeadersInit;
-};
+type ProviderCreds = { baseURL: string; apiKey: string };
 
-function getGatewayFallback(provider: 'anthropic' | 'google' | 'openai'): ProviderConfig {
+// Inference is proxied through Netlify AI Gateway. Netlify injects credentials
+// into server-side contexts in one of two forms: provider-specific variables
+// (OPENAI_API_KEY / OPENAI_BASE_URL, ...) which the official SDKs auto-detect,
+// or the always-present gateway variables (NETLIFY_AI_GATEWAY_KEY /
+// NETLIFY_AI_GATEWAY_BASE_URL). We prefer the provider variables when present
+// and otherwise point the SDK at the gateway endpoint for that provider, so a
+// call succeeds whenever either form is available. Each provider is resolved
+// independently — e.g. Anthropic creds being present does not imply OpenAI's.
+function resolveCreds(
+  provider: ModelProvider,
+  providerKey: string | undefined,
+  providerBaseUrl: string | undefined,
+  gatewaySegment: string,
+  gatewayBaseSuffix: string,
+): ProviderCreds {
+  if (providerKey && providerBaseUrl) {
+    return { apiKey: providerKey, baseURL: providerBaseUrl.replace(/\/$/, '') };
+  }
+
   const gatewayBaseUrl = process.env.NETLIFY_AI_GATEWAY_BASE_URL;
   const gatewayKey = process.env.NETLIFY_AI_GATEWAY_KEY;
 
@@ -26,68 +46,24 @@ function getGatewayFallback(provider: 'anthropic' | 'google' | 'openai'): Provid
   }
 
   return {
-    baseUrl: `${gatewayBaseUrl.replace(/\/$/, '')}/${provider}`,
-    headers: { Authorization: `Bearer ${gatewayKey}` },
+    apiKey: gatewayKey,
+    baseURL: `${gatewayBaseUrl.replace(/\/$/, '')}/${gatewaySegment}${gatewayBaseSuffix}`,
   };
 }
 
-function getOpenAIConfig(): ProviderConfig {
-  if (process.env.OPENAI_BASE_URL && process.env.OPENAI_API_KEY) {
-    return {
-      baseUrl: process.env.OPENAI_BASE_URL.replace(/\/$/, ''),
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-    };
-  }
-
-  return getGatewayFallback('openai');
-}
-
-function getAnthropicConfig(): ProviderConfig {
-  if (process.env.ANTHROPIC_BASE_URL && process.env.ANTHROPIC_API_KEY) {
-    return {
-      baseUrl: process.env.ANTHROPIC_BASE_URL.replace(/\/$/, ''),
-      headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY },
-    };
-  }
-
-  return getGatewayFallback('anthropic');
-}
-
-function getGeminiConfig(): ProviderConfig {
-  if (process.env.GOOGLE_GEMINI_BASE_URL && process.env.GEMINI_API_KEY) {
-    return {
-      baseUrl: process.env.GOOGLE_GEMINI_BASE_URL.replace(/\/$/, ''),
-      headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY },
-    };
-  }
-
-  return getGatewayFallback('google');
-}
-
-async function postJson(url: string, config: ProviderConfig, body: JsonValue, headers: HeadersInit = {}) {
-  const response = await fetch(url, {
-    method: 'POST',
-    signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
-    headers: {
-      'Content-Type': 'application/json',
-      ...config.headers,
-      ...headers,
-    },
-    body: JSON.stringify(body),
-  });
-
-  const responseText = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`AI Gateway request failed with status ${response.status}: ${responseText}`);
-  }
-
-  return JSON.parse(responseText);
-}
-
 async function callOpenAI(prompt: string) {
-  const config = getOpenAIConfig();
-  const data = await postJson(`${config.baseUrl}/v1/chat/completions`, config, {
+  // OpenAI SDK appends `/chat/completions` to baseURL, so the gateway base
+  // must include the `/v1` segment.
+  const { apiKey, baseURL } = resolveCreds(
+    'openai',
+    process.env.OPENAI_API_KEY,
+    process.env.OPENAI_BASE_URL,
+    'openai',
+    '/v1',
+  );
+  const client = new OpenAI({ apiKey, baseURL, maxRetries: SDK_MAX_RETRIES, timeout: AI_REQUEST_TIMEOUT_MS });
+
+  const completion = await client.chat.completions.create({
     model: MODEL_NAMES.openai,
     messages: [
       {
@@ -99,40 +75,49 @@ async function callOpenAI(prompt: string) {
     response_format: { type: 'json_object' },
   });
 
-  return data.choices?.[0]?.message?.content || '{}';
+  return completion.choices?.[0]?.message?.content || '{}';
 }
 
 async function callGemini(prompt: string) {
-  const config = getGeminiConfig();
-  const data = await postJson(`${config.baseUrl}/v1beta/models/${MODEL_NAMES.gemini}:generateContent`, config, {
-    contents: [
-      {
-        role: 'user',
-        parts: [{ text: prompt }],
-      },
-    ],
-    generationConfig: {
-      responseMimeType: 'application/json',
-    },
+  // @google/genai appends `/v1beta/models/...` to httpOptions.baseUrl, so the
+  // gateway base is just the `/google` provider segment.
+  const { apiKey, baseURL } = resolveCreds(
+    'gemini',
+    process.env.GEMINI_API_KEY,
+    process.env.GOOGLE_GEMINI_BASE_URL,
+    'google',
+    '',
+  );
+  const client = new GoogleGenAI({ apiKey, httpOptions: { baseUrl: baseURL, timeout: AI_REQUEST_TIMEOUT_MS } });
+
+  const response = await client.models.generateContent({
+    model: MODEL_NAMES.gemini,
+    contents: prompt,
+    config: { responseMimeType: 'application/json' },
   });
 
-  return data.candidates?.[0]?.content?.parts?.map((part: JsonValue) => part.text || '').join('') || '{}';
+  return response.text || '{}';
 }
 
 async function callClaude(prompt: string) {
-  const config = getAnthropicConfig();
-  const data = await postJson(
-    `${config.baseUrl}/v1/messages`,
-    config,
-    {
-      model: MODEL_NAMES.claude,
-      max_tokens: 1000,
-      messages: [{ role: 'user', content: `${prompt}\n\nOutput only valid JSON.` }],
-    },
-    { 'anthropic-version': '2023-06-01' },
+  // Anthropic SDK appends `/v1/messages` to baseURL, so the gateway base is
+  // just the `/anthropic` provider segment.
+  const { apiKey, baseURL } = resolveCreds(
+    'claude',
+    process.env.ANTHROPIC_API_KEY,
+    process.env.ANTHROPIC_BASE_URL,
+    'anthropic',
+    '',
   );
+  const client = new Anthropic({ apiKey, baseURL, maxRetries: SDK_MAX_RETRIES, timeout: AI_REQUEST_TIMEOUT_MS });
 
-  return data.content?.map((block: JsonValue) => block.text || '').join('') || '{}';
+  const message = await client.messages.create({
+    model: MODEL_NAMES.claude,
+    max_tokens: 1000,
+    messages: [{ role: 'user', content: `${prompt}\n\nOutput only valid JSON.` }],
+  });
+
+  return message.content.map((block) => (block.type === 'text' ? block.text : '')).join('') || '{}';
 }
 
 // Largest-remainder rounding so the three categories always sum to exactly 100
@@ -187,8 +172,8 @@ function parseAllocation(rawJson: string): ActionAllocation {
   };
 }
 
-// Inference is proxied through Netlify AI Gateway. Netlify injects provider
-// URLs and credentials into server-side contexts for these direct HTTP calls.
+// Inference is proxied through Netlify AI Gateway via the official provider
+// SDKs (see resolveCreds for how credentials are sourced).
 export async function callLLM(provider: ModelProvider, prompt: string): Promise<ActionAllocation> {
   let lastError: unknown;
 
