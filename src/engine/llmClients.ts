@@ -25,8 +25,15 @@ function getGatewayFallback(provider: 'anthropic' | 'google' | 'openai'): Provid
     throw new Error(`Netlify AI Gateway environment is not available for ${provider} in this server context.`);
   }
 
+  // The Netlify AI Gateway routes by each provider's native API path
+  // (…/v1/messages for Anthropic, …/v1/chat/completions for OpenAI,
+  // …/v1beta/models/* for Gemini) — NOT by a provider-prefixed segment.
+  // Appending `/${provider}` here pointed every gateway-routed call at a
+  // non-existent path and returned 404, which exhausted callLLM's retries and
+  // failed the round. Use the gateway base URL directly; the per-provider call
+  // helpers append the correct native path.
   return {
-    baseUrl: `${gatewayBaseUrl.replace(/\/$/, '')}/${provider}`,
+    baseUrl: gatewayBaseUrl.replace(/\/$/, ''),
     headers: { Authorization: `Bearer ${gatewayKey}` },
   };
 }
