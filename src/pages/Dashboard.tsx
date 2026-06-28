@@ -1,31 +1,53 @@
-import React, { useState } from 'react';
-import { Download, FastForward, Play } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, Download, FastForward, Play, RotateCcw } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import type { GameState, GameConfig } from '../engine/types';
+import { createInitialState } from '../engine/engine';
 import { exportToExcel } from '../utils/exportExcel';
 import { MODEL_NAMES } from '../engine/models';
 
-const INITIAL_STATE: GameState = {
-  gameId: 'game-spectator',
-  currentRound: 1,
-  factions: {
-    emperor: { militaryStrength: 100, internalLoyalty: 50, territoryControl: 100 },
-    foes: { militaryStrength: 20, internalLoyalty: 80, territoryControl: 0 },
-    seljuks: { militaryStrength: 80, internalLoyalty: 100, territoryControl: 0 },
-  },
-  history: [],
-  winner: null,
-};
+const SAVED_GAME_KEY = 'mantzikert-spectator-state';
+const SAVED_PROGRESS_KEY = 'mantzikert-background-progress';
+
+function loadSavedGame(): GameState {
+  if (typeof window === 'undefined') return createInitialState('game-spectator');
+
+  try {
+    const raw = window.localStorage.getItem(SAVED_GAME_KEY);
+    if (!raw) return createInitialState('game-spectator');
+    const parsed = JSON.parse(raw) as GameState;
+    return parsed?.gameId === 'game-spectator' ? parsed : createInitialState('game-spectator');
+  } catch {
+    return createInitialState('game-spectator');
+  }
+}
+
+function loadSavedProgress(): number {
+  if (typeof window === 'undefined') return 0;
+  const parsed = Number(window.localStorage.getItem(SAVED_PROGRESS_KEY) ?? '0');
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : 0;
+}
 
 const Dashboard: React.FC = () => {
-  const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
+  const navigate = useNavigate();
+  const [gameState, setGameState] = useState<GameState>(() => loadSavedGame());
   const [isPlaying, setIsPlaying] = useState(false);
-  const [backgroundProgress, setBackgroundProgress] = useState(0);
+  const [backgroundProgress, setBackgroundProgress] = useState(() => loadSavedProgress());
+  const [batchStarted, setBatchStarted] = useState(() => loadSavedProgress() > 0);
   const [downloading, setDownloading] = useState(false);
 
-  const config: GameConfig = {
+  const config: GameConfig = useMemo(() => ({
     gameId: 'game-spectator',
     roles: { emperor: 'openai', foes: 'gemini', seljuks: 'claude' }
-  };
+  }), []);
+
+  useEffect(() => {
+    window.localStorage.setItem(SAVED_GAME_KEY, JSON.stringify(gameState));
+  }, [gameState]);
+
+  useEffect(() => {
+    window.localStorage.setItem(SAVED_PROGRESS_KEY, String(backgroundProgress));
+  }, [backgroundProgress]);
 
   const playNextRound = async () => {
     if (gameState.currentRound > 12 || isPlaying) return;
@@ -57,6 +79,8 @@ const Dashboard: React.FC = () => {
   };
 
   const startBackgroundBatch = async () => {
+    if (batchStarted) return;
+    setBatchStarted(true);
     const totalGames = 299;
     const batchSize = 10;
     const numBatches = Math.ceil(totalGames / batchSize);
@@ -85,6 +109,16 @@ const Dashboard: React.FC = () => {
     }, 10000);
   };
 
+  const resetSpectatorRun = () => {
+    const nextState = createInitialState('game-spectator');
+    setGameState(nextState);
+    window.localStorage.setItem(SAVED_GAME_KEY, JSON.stringify(nextState));
+  };
+
+  const latestRecord = gameState.history[gameState.history.length - 1];
+  const roundLabel = gameState.currentRound > 12 ? 12 : gameState.currentRound;
+  const completed = Boolean(gameState.winner || gameState.currentRound > 12);
+
   const handleDownload = async () => {
     setDownloading(true);
     try {
@@ -102,8 +136,19 @@ const Dashboard: React.FC = () => {
   };
 
   return (
-    <div>
-      <div className="header" style={{ marginBottom: '2rem' }}>
+    <div className="dashboard-page">
+      <div className="dashboard-topbar">
+        <button className="icon-button" type="button" onClick={() => navigate('/')}>
+          <ArrowLeft size={18} />
+          <span>Config</span>
+        </button>
+        <button className="icon-button" type="button" onClick={resetSpectatorRun}>
+          <RotateCcw size={18} />
+          <span>Reset Run</span>
+        </button>
+      </div>
+
+      <div className="header dashboard-header">
         <h1>Live Simulation Monitor</h1>
         <p>Spectator Game (1 of 300)</p>
       </div>
@@ -118,8 +163,8 @@ const Dashboard: React.FC = () => {
             <p>Territory: {gameState.factions.emperor.territoryControl.toFixed(1)} / 100</p>
           </div>
           {gameState.history.length > 0 && (
-             <div style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                <em>"{gameState.history[gameState.history.length-1].allocations.emperor.selfAssessment}"</em>
+             <div className="assessment">
+                <em>"{latestRecord.allocations.emperor.selfAssessment}"</em>
              </div>
           )}
         </div>
@@ -132,8 +177,8 @@ const Dashboard: React.FC = () => {
             <p>Loyalty: {gameState.factions.foes.internalLoyalty.toFixed(1)} / 100</p>
           </div>
           {gameState.history.length > 0 && (
-             <div style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                <em>"{gameState.history[gameState.history.length-1].allocations.foes.selfAssessment}"</em>
+             <div className="assessment">
+                <em>"{latestRecord.allocations.foes.selfAssessment}"</em>
              </div>
           )}
         </div>
@@ -146,8 +191,8 @@ const Dashboard: React.FC = () => {
             <p>Territory: {gameState.factions.seljuks.territoryControl.toFixed(1)} / 100</p>
           </div>
           {gameState.history.length > 0 && (
-             <div style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                <em>"{gameState.history[gameState.history.length-1].allocations.seljuks.selfAssessment}"</em>
+             <div className="assessment">
+                <em>"{latestRecord.allocations.seljuks.selfAssessment}"</em>
              </div>
           )}
         </div>
@@ -156,19 +201,19 @@ const Dashboard: React.FC = () => {
       <div className="glass-panel" style={{ marginTop: '2rem' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <h2>Round {Math.min(gameState.currentRound, 12)} / 12</h2>
+            <h2>Round {roundLabel} / 12</h2>
             {gameState.winner && <p style={{ color: 'var(--accent-color)', fontWeight: 'bold' }}>Winner: {gameState.winner.toUpperCase()}</p>}
           </div>
           <button 
             className="btn btn-primary"
             onClick={playNextRound}
-            disabled={isPlaying || gameState.currentRound > 12}
+            disabled={isPlaying || completed}
           >
-            {isPlaying ? 'Computing...' : <><Play size={18} style={{ marginRight: '0.5rem' }} /> Play Next Round</>}
+            {isPlaying ? 'Computing...' : <><Play size={18} /> {gameState.history.length === 0 ? 'Start Spectator Round' : 'Resume Next Round'}</>}
           </button>
         </div>
 
-        <div style={{ marginTop: '1.5rem', maxHeight: '200px', overflowY: 'auto', background: 'rgba(0,0,0,0.3)', padding: '1rem', borderRadius: '8px' }}>
+        <div className="event-log">
           {gameState.history.length === 0 && <p style={{ color: 'var(--text-secondary)' }}>Game has not started yet.</p>}
           {gameState.history.map((record, i) => (
             <div key={i} style={{ marginBottom: '1rem' }}>
@@ -186,13 +231,13 @@ const Dashboard: React.FC = () => {
         <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the remaining 299 games in the background and export all data to Excel.</p>
         
         <div style={{ display: 'flex', gap: '1rem' }}>
-          <button className="btn btn-primary" onClick={startBackgroundBatch}>
-            <FastForward size={18} style={{ marginRight: '0.5rem' }} /> 
-            Start 299 Background Games
+          <button className="btn btn-primary" onClick={startBackgroundBatch} disabled={batchStarted}>
+            <FastForward size={18} /> 
+            {batchStarted ? 'Background Games Started' : 'Start 299 Background Games'}
           </button>
 
-          <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={handleDownload} disabled={downloading}>
-            <Download size={18} style={{ marginRight: '0.5rem' }} /> 
+          <button className="btn btn-secondary" onClick={handleDownload} disabled={downloading}>
+            <Download size={18} /> 
             {downloading ? 'Preparing Excel...' : 'Download Results'}
           </button>
         </div>
