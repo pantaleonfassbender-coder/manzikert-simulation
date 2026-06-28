@@ -23,11 +23,7 @@ export const handler: Handler = async (event) => {
       const gameIndex = startIndex + i;
       const gameId = `game-${gameIndex}`;
       
-      // Determine roles based on index (1-100, 101-200, 201-300)
-      // Since it's 0-indexed:
-      // 0-99: openai, gemini, claude
-      // 100-199: gemini, claude, openai
-      // 200-299: claude, openai, gemini
+      // Rotate roles across three equal 100-game groups.
       let roles: Record<Faction, any> = { emperor: 'openai', foes: 'gemini', seljuks: 'claude' };
       if (gameIndex >= 100 && gameIndex < 200) {
         roles = { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
