@@ -19,6 +19,7 @@ export function generatePrompt(faction: Faction, state: GameState, previousAlloc
   basePrompt += `- Emperor's Military Strength Base: ${state.factions.emperor.militaryStrength}\n`;
   basePrompt += `- Emperor's Internal Loyalty: ${state.factions.emperor.internalLoyalty.toFixed(1)}/100 (Modifies effective military)\n`;
   basePrompt += `- Emperor's Territory Control (Mantzikert region): ${state.factions.emperor.territoryControl.toFixed(1)}/100\n`;
+  basePrompt += `- Doukas (Foes) Court Influence: ${state.factions.foes.internalLoyalty.toFixed(1)}/100\n`;
   basePrompt += `- Foes' Sabotage Capability Base: ${state.factions.foes.militaryStrength}\n`;
   basePrompt += `- Seljuk Military Strength Base: ${state.factions.seljuks.militaryStrength}\n\n`;
 
@@ -52,8 +53,8 @@ export function generatePrompt(faction: Faction, state: GameState, previousAlloc
   basePrompt += `\nINSTRUCTIONS:
 You have exactly 100 Action Points (AP) to spend this round. You must distribute them across:
 - military: Offense/defense. For Emperor and Seljuks, this fights for territory. For Foes, this sabotages Emperor's military.
-- diplomacy: Used to show commitment when sending messages.
-- internal: Propaganda/Politics. Emperor spends this to raise loyalty. Foes spend this to lower Emperor's loyalty.
+- diplomacy: Forges or breaks coalitions, and has a real mechanical effect. If the Foes and the Seljuks BOTH spend diplomacy, they coordinate a combined assault on the Emperor (the lower of their two diplomacy investments sets the coalition's strength, which amplifies both Foes sabotage and the Seljuk attack). The Emperor spends diplomacy to fracture that coalition and reduce its effectiveness.
+- internal: Court politics. The Emperor spends this to raise his Loyalty; the Foes spend this to lower the Emperor's Loyalty AND to raise their own Court Influence.
 
 You may also send messages to the other factions.
 You must provide a 2-3 sentence selfAssessment of your strategy.
