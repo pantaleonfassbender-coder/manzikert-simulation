@@ -1,4 +1,5 @@
 import type { ModelProvider, ActionAllocation } from './types';
+import { MODEL_TAU } from './batch';
 import { MODEL_NAMES } from './models';
 
 const AI_REQUEST_TIMEOUT_MS = 20000;
@@ -89,6 +90,7 @@ async function callOpenAI(prompt: string) {
       { role: 'user', content: prompt },
     ],
     response_format: { type: 'json_object' },
+    temperature: MODEL_TAU,
   });
 
   return data.choices?.[0]?.message?.content || '{}';
@@ -105,6 +107,7 @@ async function callGemini(prompt: string) {
     ],
     generationConfig: {
       responseMimeType: 'application/json',
+      temperature: MODEL_TAU,
     },
   });
 
@@ -119,6 +122,7 @@ async function callClaude(prompt: string) {
     {
       model: MODEL_NAMES.claude,
       max_tokens: 1000,
+      temperature: MODEL_TAU,
       messages: [{ role: 'user', content: `${prompt}\n\nOutput only valid JSON.` }],
     },
     { 'anthropic-version': '2023-06-01' },

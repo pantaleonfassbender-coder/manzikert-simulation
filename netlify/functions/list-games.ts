@@ -9,8 +9,8 @@ export const handler: Handler = async () => {
     // Fetch all game data
     const games = await Promise.all(
       blobs
-        .filter(b => b.key.startsWith('game-'))
-        .map(async (b) => await gamesStore.getJSON(b.key))
+        .filter(b => /^game-\d+$/.test(b.key))
+        .map(async (b) => await gamesStore.get(b.key, { type: 'json' }))
     );
 
     return {
