@@ -21,6 +21,7 @@ const Dashboard: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [backgroundProgress, setBackgroundProgress] = useState(0);
   const [downloading, setDownloading] = useState(false);
+  const [batchStarting, setBatchStarting] = useState(false);
 
   const config: GameConfig = {
     gameId: 'game-spectator',
@@ -57,32 +58,41 @@ const Dashboard: React.FC = () => {
   };
 
   const startBackgroundBatch = async () => {
-    const totalGames = 299;
+    if (batchStarting) return;
+
+    const totalGames = 300;
     const batchSize = 10;
     const numBatches = Math.ceil(totalGames / batchSize);
-    
-    // We fire and forget them in chunks to Netlify background functions
-    // Note: Netlify free tier might rate limit concurrent background functions,
-    // so we will just fire them off. In a real production system we'd use a queue.
-    for (let i = 0; i < numBatches; i++) {
-      const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
-      const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
-      fetch('/.netlify/functions/batch-games-background', {
-        method: 'POST',
-        body: JSON.stringify({ batchId: 'main', startIndex, count })
-      }).catch(console.error);
+
+    setBatchStarting(true);
+    setBackgroundProgress(0);
+
+    try {
+      for (let i = 0; i < numBatches; i++) {
+        const startIndex = i * batchSize;
+        const count = Math.min(batchSize, totalGames - startIndex);
+
+        const res = await fetch('/.netlify/functions/batch-games-background', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ batchId: 'main', startIndex, count })
+        });
+
+        if (!res.ok) {
+          const message = await res.text();
+          throw new Error(message || `Batch request failed with status ${res.status}`);
+        }
+
+        setBackgroundProgress(Math.round(((i + 1) / numBatches) * 100));
+      }
+
+      alert('Started the background game batch. Check back in a few minutes to download results.');
+    } catch (e) {
+      console.error(e);
+      alert('Batch control failed. Please try again.');
+    } finally {
+      setBatchStarting(false);
     }
-    
-    alert('Started 299 games in the background. Check back in a few minutes to download results.');
-    
-    // Mock progress bar
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 5;
-      setBackgroundProgress(Math.min(prog, 100));
-      if (prog >= 100) clearInterval(interval);
-    }, 10000);
   };
 
   const handleDownload = async () => {
@@ -183,12 +193,12 @@ const Dashboard: React.FC = () => {
 
       <div className="glass-panel" style={{ marginTop: '2rem' }}>
         <h2>Batch Processing</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the remaining 299 games in the background and export all data to Excel.</p>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the full background batch and export all data to Excel.</p>
         
         <div style={{ display: 'flex', gap: '1rem' }}>
-          <button className="btn btn-primary" onClick={startBackgroundBatch}>
+          <button className="btn btn-primary" onClick={startBackgroundBatch} disabled={batchStarting}>
             <FastForward size={18} style={{ marginRight: '0.5rem' }} /> 
-            Start 299 Background Games
+            {batchStarting ? 'Starting Batch...' : 'Start Background Batch'}
           </button>
 
           <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={handleDownload} disabled={downloading}>
