@@ -49,7 +49,16 @@ const Dashboard: React.FC = () => {
       });
 
       if (!res.ok) {
-        throw new Error(`Round request failed with status ${res.status}`);
+        const errorText = await res.text();
+        let errorMessage = errorText;
+
+        try {
+          errorMessage = JSON.parse(errorText).error || errorText;
+        } catch {
+          // Keep the raw response text when the function did not return JSON.
+        }
+
+        throw new Error(errorMessage || `Round request failed with status ${res.status}`);
       }
 
       const data = await res.json();
@@ -60,7 +69,7 @@ const Dashboard: React.FC = () => {
       }
     } catch (e) {
       console.error(e);
-      alert('Error playing round');
+      alert(`Error playing round: ${e instanceof Error ? e.message : 'Unknown error'}`);
     } finally {
       setIsPlaying(false);
     }
