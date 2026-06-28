@@ -9,19 +9,29 @@ const INITIAL_STATE: GameState = {
   currentRound: 1,
   factions: {
     emperor: { militaryStrength: 100, internalLoyalty: 50, territoryControl: 100 },
-    foes: { militaryStrength: 20, internalLoyalty: 80, territoryControl: 0 },
+    foes: { militaryStrength: 20, internalLoyalty: 50, territoryControl: 0 },
     seljuks: { militaryStrength: 80, internalLoyalty: 100, territoryControl: 0 },
   },
   history: [],
   winner: null,
 };
 
+const TOTAL_GAMES = 300;
+
+// A game counts toward the preregistered N only if all 12 rounds completed and
+// a winner was resolved.
+const isComplete = (g: any) => g?.finalState?.history?.length === 12 && !!g?.finalState?.winner;
+
 const Dashboard: React.FC = () => {
   const [gameState, setGameState] = useState<GameState>(INITIAL_STATE);
   const [isPlaying, setIsPlaying] = useState(false);
   const [backgroundProgress, setBackgroundProgress] = useState(0);
+  const [completedGames, setCompletedGames] = useState(0);
   const [downloading, setDownloading] = useState(false);
 
+  // The spectator view is a live demo of a single game and is NOT part of the
+  // research dataset. The full N = 300 dataset is produced entirely by the
+  // background batch (game-0 ... game-299) so it never depends on manual play.
   const config: GameConfig = {
     gameId: 'game-spectator',
     roles: { emperor: 'openai', foes: 'gemini', seljuks: 'claude' }
@@ -56,33 +66,41 @@ const Dashboard: React.FC = () => {
     }
   };
 
+  const pollProgress = () => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('/.netlify/functions/list-games');
+        const data = await res.json();
+        const completed = (data.games || []).filter(isComplete).length;
+        setCompletedGames(completed);
+        setBackgroundProgress(Math.round((completed / TOTAL_GAMES) * 100));
+        if (completed >= TOTAL_GAMES) clearInterval(interval);
+      } catch (e) {
+        console.error(e);
+      }
+    }, 10000);
+  };
+
   const startBackgroundBatch = async () => {
-    const totalGames = 299;
     const batchSize = 10;
-    const numBatches = Math.ceil(totalGames / batchSize);
-    
-    // We fire and forget them in chunks to Netlify background functions
-    // Note: Netlify free tier might rate limit concurrent background functions,
-    // so we will just fire them off. In a real production system we'd use a queue.
+    const numBatches = Math.ceil(TOTAL_GAMES / batchSize);
+
+    // Fire-and-forget chunks to Netlify background functions. Games are indexed
+    // 0 ... 299 so the dataset is fully produced by the batch (no reliance on
+    // the manual spectator game). Each background function discards and re-runs
+    // any game that fails.
     for (let i = 0; i < numBatches; i++) {
-      const startIndex = 1 + (i * batchSize); // start at index 1 since 0 is spectator
-      const count = Math.min(batchSize, totalGames - (startIndex - 1));
-      
+      const startIndex = i * batchSize;
+      const count = Math.min(batchSize, TOTAL_GAMES - startIndex);
+
       fetch('/.netlify/functions/batch-games-background', {
         method: 'POST',
         body: JSON.stringify({ batchId: 'main', startIndex, count })
       }).catch(console.error);
     }
-    
-    alert('Started 299 games in the background. Check back in a few minutes to download results.');
-    
-    // Mock progress bar
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 5;
-      setBackgroundProgress(Math.min(prog, 100));
-      if (prog >= 100) clearInterval(interval);
-    }, 10000);
+
+    alert(`Started ${TOTAL_GAMES} games in the background. Progress below updates as games complete.`);
+    pollProgress();
   };
 
   const handleDownload = async () => {
@@ -90,10 +108,23 @@ const Dashboard: React.FC = () => {
     try {
       const res = await fetch('/.netlify/functions/list-games');
       const data = await res.json();
-      
-      // Merge spectator game with background games
-      const allGames = [{ gameId: 'game-0', roles: config.roles, finalState: gameState }, ...(data.games || [])];
-      exportToExcel(allGames);
+      const games = data.games || [];
+      const complete = games.filter(isComplete);
+
+      if (complete.length !== TOTAL_GAMES) {
+        const proceed = window.confirm(
+          `Only ${complete.length} of ${TOTAL_GAMES} complete games are available.\n\n` +
+          `The preregistration requires exactly ${TOTAL_GAMES} complete games. ` +
+          `Re-run "Start ${TOTAL_GAMES}-Game Simulation" to fill any gaps, or export this partial dataset anyway?`
+        );
+        if (!proceed) {
+          setDownloading(false);
+          return;
+        }
+      }
+
+      // Export only complete games — never the in-progress spectator state.
+      exportToExcel(complete);
     } catch (e) {
       console.error(e);
       alert('Failed to download excel');
@@ -129,7 +160,7 @@ const Dashboard: React.FC = () => {
           <h3 style={{ color: 'var(--foes-color)' }}>Internal Foes</h3>
           <p>Model: {MODEL_NAMES[config.roles.foes]}</p>
           <div style={{ marginTop: '1rem' }}>
-            <p>Loyalty: {gameState.factions.foes.internalLoyalty.toFixed(1)} / 100</p>
+            <p>Court Influence: {gameState.factions.foes.internalLoyalty.toFixed(1)} / 100</p>
           </div>
           {gameState.history.length > 0 && (
              <div style={{ marginTop: '1rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
@@ -183,12 +214,12 @@ const Dashboard: React.FC = () => {
 
       <div className="glass-panel" style={{ marginTop: '2rem' }}>
         <h2>Batch Processing</h2>
-        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the remaining 299 games in the background and export all data to Excel.</p>
-        
+        <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>Run the full {TOTAL_GAMES}-game simulation in the background and export all data to Excel.</p>
+
         <div style={{ display: 'flex', gap: '1rem' }}>
           <button className="btn btn-primary" onClick={startBackgroundBatch}>
-            <FastForward size={18} style={{ marginRight: '0.5rem' }} /> 
-            Start 299 Background Games
+            <FastForward size={18} style={{ marginRight: '0.5rem' }} />
+            Start {TOTAL_GAMES}-Game Simulation
           </button>
 
           <button className="btn" style={{ background: 'rgba(255,255,255,0.1)' }} onClick={handleDownload} disabled={downloading}>
@@ -199,7 +230,9 @@ const Dashboard: React.FC = () => {
 
         {backgroundProgress > 0 && (
            <div style={{ marginTop: '1.5rem' }}>
-             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Background jobs initiated...</p>
+             <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+               {completedGames} / {TOTAL_GAMES} complete games saved ({backgroundProgress}%)
+             </p>
              <div className="progress-bar">
                <div className="progress-fill" style={{ width: `${backgroundProgress}%` }}></div>
              </div>
