@@ -9,6 +9,15 @@ const AI_REQUEST_TIMEOUT_MS = 20000;
 const MAX_LLM_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = 750;
 
+// The prompt instructs an 80-120 word self-assessment (for reliable LIWC-22
+// percentages) and >= 1 diplomatic message (the "cheap talk" H2 needs). We HARD-
+// reject a response only if it falls below this floor, deliberately set BELOW 80
+// rather than at 80: rejecting-and-re-running every 70-79 word reply would
+// selectively discard the more terse models, biasing the LIWC sample against
+// exactly the architectural differences H3 is trying to measure. Raise to 80 only
+// if you accept that selection-bias risk.
+const MIN_SELF_ASSESSMENT_WORDS = 60;
+
 const delay = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
 type JsonValue = Record<string, any>;
@@ -175,6 +184,19 @@ function parseAllocation(rawJson: string): ActionAllocation {
   if (!selfAssessment) {
     throw new Error('Malformed allocation: missing mandatory selfAssessment.');
   }
+  const wordCount = selfAssessment.split(/\s+/).filter(Boolean).length;
+  if (wordCount < MIN_SELF_ASSESSMENT_WORDS) {
+    throw new Error(
+      `Malformed allocation: selfAssessment too short (${wordCount} words; need >= ${MIN_SELF_ASSESSMENT_WORDS}).`,
+    );
+  }
+
+  // At least one non-empty diplomatic message is mandatory (the H2 "cheap talk").
+  const messages = parsed.messages && typeof parsed.messages === 'object' ? parsed.messages : {};
+  const hasMessage = Object.values(messages).some((m) => typeof m === 'string' && m.trim().length > 0);
+  if (!hasMessage) {
+    throw new Error('Malformed allocation: at least one non-empty diplomatic message is required.');
+  }
 
   const [normMilitary, normDiplomacy, normInternal] = normalizeTo100(military, diplomacy, internal);
 
@@ -182,7 +204,7 @@ function parseAllocation(rawJson: string): ActionAllocation {
     military: normMilitary,
     diplomacy: normDiplomacy,
     internal: normInternal,
-    messages: parsed.messages && typeof parsed.messages === 'object' ? parsed.messages : {},
+    messages,
     selfAssessment,
   };
 }

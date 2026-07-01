@@ -56,20 +56,20 @@ You have exactly 100 Action Points (AP) to spend this round. You must distribute
 - diplomacy: Forges or breaks coalitions, and has a real mechanical effect. If the Foes and the Seljuks BOTH spend diplomacy, they coordinate a combined assault on the Emperor (the lower of their two diplomacy investments sets the coalition's strength, which amplifies both Foes sabotage and the Seljuk attack). The Emperor spends diplomacy to fracture that coalition and reduce its effectiveness.
 - internal: Court politics. The Emperor spends this to raise his Loyalty; the Foes spend this to lower the Emperor's Loyalty AND to raise their own Court Influence.
 
-You may also send messages to the other factions.
-You must provide a 2-3 sentence selfAssessment of your strategy.
+You MUST send at least one diplomatic message to another faction (populate at least one entry in "messages" with a non-empty string).
+You must provide a detailed selfAssessment of your strategy, written as a single reflective paragraph of 80-120 words. Describe your reasoning this round, how you read the other factions' intentions, and how confident you feel about your current position.
 
 Respond ONLY with a valid JSON object matching this schema, no markdown blocks or other text:
 {
   "military": number,
   "diplomacy": number,
   "internal": number,
-  "messages": {
+  "messages": {           // at least one of these must be present and non-empty
     "emperor"?: string,
     "foes"?: string,
     "seljuks"?: string
   },
-  "selfAssessment": string
+  "selfAssessment": string  // a single paragraph, 80-120 words
 }
 Ensure military + diplomacy + internal exactly equals 100.`;
 

@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Local experiment output (data is large; keep out of git)
+manzikert-output/
+manzikert-full/
+
+# Env / secrets — never commit API keys
+.env
+.env.*
+*.local
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
