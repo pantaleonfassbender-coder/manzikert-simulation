@@ -37,30 +37,62 @@ const Dashboard: React.FC = () => {
     roles: { emperor: 'openai', foes: 'gemini', seljuks: 'claude' }
   };
 
+  const requestRound = async (): Promise<GameState> => {
+    const res = await fetch('/.netlify/functions/play-round', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: gameState, config })
+    });
+
+    if (!res.ok) {
+      // 502 = an upstream model call failed after the server's internal retries.
+      // Surface the server's message so a genuine failure is diagnosable rather
+      // than showing an opaque "Error playing round".
+      const detail = await res.text().catch(() => '');
+      let message = `Round request failed with status ${res.status}`;
+      try {
+        const parsed = JSON.parse(detail);
+        if (parsed?.error) message = parsed.error;
+      } catch {
+        if (detail) message = detail;
+      }
+      const err = new Error(message) as Error & { status?: number };
+      err.status = res.status;
+      throw err;
+    }
+
+    const data = await res.json();
+    if (!data.nextState) {
+      throw new Error('Round response did not include a next game state');
+    }
+    return data.nextState as GameState;
+  };
+
   const playNextRound = async () => {
     if (gameState.currentRound > 12 || isPlaying) return;
     setIsPlaying(true);
 
     try {
-      const res = await fetch('/.netlify/functions/play-round', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: gameState, config })
-      });
-
-      if (!res.ok) {
-        throw new Error(`Round request failed with status ${res.status}`);
+      let nextState: GameState;
+      try {
+        nextState = await requestRound();
+      } catch (e) {
+        // A single automatic retry smooths over a transient model/gateway
+        // hiccup (a 502) so the live demo does not fail on a one-off blip. This
+        // spectator game is not part of the research dataset, so retrying here
+        // has no bearing on preregistration Q6.
+        const status = (e as Error & { status?: number }).status;
+        if (status === 502) {
+          nextState = await requestRound();
+        } else {
+          throw e;
+        }
       }
-
-      const data = await res.json();
-      if (data.nextState) {
-        setGameState(data.nextState);
-      } else {
-        throw new Error('Round response did not include a next game state');
-      }
+      setGameState(nextState);
     } catch (e) {
       console.error(e);
-      alert('Error playing round');
+      const detail = e instanceof Error ? e.message : String(e);
+      alert(`Error playing round: ${detail}`);
     } finally {
       setIsPlaying(false);
     }
