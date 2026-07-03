@@ -73,3 +73,27 @@ data collection; win conditions are unchanged from the registered design.
 `openai: gpt-5.5`, `gemini: gemini-3.1-pro-preview`, `claude: claude-opus-4-8`
 (`src/engine/models.ts`), all run at provider-default settings (no reasoning
 throttling) to keep the three-model comparison fair for H3.
+
+## 5. Robustness & generalization arms (preregistered exploratory; opt-in)
+
+Two exploratory arms, run **outside** the confirmatory N = 300 and reported
+separately. See `AsPredicted_Addendum_Robustness.md`. The confirmatory default
+(`--scenario byzantine`, three proprietary models) is **byte-for-byte unchanged**.
+
+- **Scenario invariance** (`--scenario byzantine_swap|galactic`): the identical
+  engine re-skinned into a name-swapped medieval frame and a fully fictional,
+  outcome-unknown interstellar frame. Mechanics, KPI dynamics, AP categories, and
+  the JSON schema are unchanged; engine event strings are relabelled so no original
+  proper nouns leak into later prompts. The fictional frame also controls for the
+  models possibly having memorized the real Manzikert outcome. Analyzed as a
+  scenario × KPI moderation test on the H1 markers.
+- **Open-weight model** (`--mode compat-only`): substitutes one open-weight model
+  (all three seats) via a generic OpenAI-compatible endpoint. Env:
+  `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_API_KEY`, `OPENAI_COMPAT_MODEL`
+  (set `OPENAI_COMPAT_JSON=0` if a model rejects JSON mode). Works with a local
+  server (LM Studio) or a hosted endpoint (Groq/Together/Fireworks/OpenRouter).
+  Compared descriptively against the three proprietary models; H3 remains
+  descriptive-of-these-systems, not a general architectural inference.
+
+Dev helper: `node manzikert-run.mjs --scenario <name> --print-prompt` dumps sample
+round-1 and round-2 prompts for inspection.

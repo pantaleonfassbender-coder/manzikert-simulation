@@ -26,13 +26,16 @@ const getArg = (name, def) => {
   const i = argv.indexOf(`--${name}`);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : def;
 };
-const MODE = getArg('mode', 'stub');           // stub | gemini-only | real
+const MODE = getArg('mode', 'stub');              // stub | gemini-only | compat-only | real
+const SCENARIO = getArg('scenario', 'byzantine'); // byzantine | byzantine_swap | galactic
 const GAMES = parseInt(getArg('games', '1'), 10);
 const START_INDEX = parseInt(getArg('start', '0'), 10);
 const OUT_DIR = getArg('out', join(process.cwd(), 'manzikert-output'));
 const ROUND_DELAY_MS = parseInt(getArg('delay', '400'), 10);
+const PRINT_PROMPT = argv.includes('--print-prompt'); // dev: dump sample prompts and exit
 
-const MODEL_NAMES = { openai: 'gpt-5.5', gemini: 'gemini-3.1-pro-preview', claude: 'claude-opus-4-8' };
+const COMPAT_MODEL = process.env.OPENAI_COMPAT_MODEL || 'open-model';
+const MODEL_NAMES = { openai: 'gpt-5.5', gemini: 'gemini-3.1-pro-preview', claude: 'claude-opus-4-8', compat: COMPAT_MODEL };
 const MIN_SELF_ASSESSMENT_WORDS = 60;
 const MAX_LLM_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = 750;
@@ -56,6 +59,14 @@ const anthropicConfig = () => (process.env.ANTHROPIC_BASE_URL && process.env.ANT
 const geminiConfig = () => (process.env.GOOGLE_GEMINI_BASE_URL && process.env.GEMINI_API_KEY)
   ? { baseUrl: process.env.GOOGLE_GEMINI_BASE_URL.replace(/\/$/, ''), headers: { 'x-goog-api-key': process.env.GEMINI_API_KEY } }
   : gatewayFallback('google');
+// Generic OpenAI-compatible provider for open-weight models — local (LM Studio,
+// http://localhost:1234/v1) or hosted (Groq .../openai/v1, Together/Fireworks/
+// OpenRouter .../v1). The base URL must include the version segment the host expects.
+const compatConfig = () => {
+  if (process.env.OPENAI_COMPAT_BASE_URL && process.env.OPENAI_COMPAT_API_KEY)
+    return { baseUrl: process.env.OPENAI_COMPAT_BASE_URL.replace(/\/$/, ''), headers: { Authorization: `Bearer ${process.env.OPENAI_COMPAT_API_KEY}` } };
+  throw new Error('compat provider needs OPENAI_COMPAT_BASE_URL + OPENAI_COMPAT_API_KEY (+ OPENAI_COMPAT_MODEL)');
+};
 
 async function postJson(url, config, body, extra = {}) {
   const res = await fetch(url, {
@@ -89,6 +100,18 @@ async function callClaude(prompt) {
     model: MODEL_NAMES.claude, max_tokens: 1000, messages: [{ role: 'user', content: `${prompt}\n\nOutput only valid JSON.` }],
   }, { 'anthropic-version': '2023-06-01' });
   return d.content?.map((b) => b.text || '').join('') || '{}';
+}
+async function callCompat(prompt) {
+  const c = compatConfig();
+  const bodyReq = {
+    model: COMPAT_MODEL,
+    messages: [{ role: 'system', content: 'Return only valid JSON. No markdown or commentary.' }, { role: 'user', content: prompt }],
+  };
+  // Most hosted open-model endpoints support JSON mode; if a model rejects it,
+  // set OPENAI_COMPAT_JSON=0 to drop it and rely on the prompt + parser fences.
+  if (process.env.OPENAI_COMPAT_JSON !== '0') bodyReq.response_format = { type: 'json_object' };
+  const d = await postJson(`${c.baseUrl}/chat/completions`, c, bodyReq);
+  return d.choices?.[0]?.message?.content || '{}';
 }
 
 // ---------- stub agent (no API) ----------
@@ -136,6 +159,7 @@ async function callLLM(provider, prompt, faction) {
       else if (provider === 'openai') raw = await callOpenAI(prompt);
       else if (provider === 'gemini') raw = await callGemini(prompt);
       else if (provider === 'claude') raw = await callClaude(prompt);
+      else if (provider === 'compat') raw = await callCompat(prompt);
       else throw new Error(`unknown provider ${provider}`);
       return parseAllocation(raw);
     } catch (e) { last = e; if (a < MAX_LLM_ATTEMPTS) await delay(RETRY_BACKOFF_MS * a); }
@@ -235,8 +259,115 @@ Ensure military + diplomacy + internal exactly equals 100.`;
   return p;
 }
 
+// ---------- alternative scenarios (robustness re-skins; ENGINE UNCHANGED) ----------
+// Only the narrative wrapper differs. The deterministic engine, KPI dynamics, AP
+// categories, JSON schema, and internal message keys (emperor/foes/seljuks) are
+// identical, so results are directly comparable to the byzantine default. Purpose:
+// test whether the H1 effect is invariant to the specific vignette, and control for
+// the models possibly having memorized the real Manzikert outcome (the galactic
+// re-skin is fictional with no known ending). Event strings from the engine are
+// relabelled to the theme so no original proper nouns leak into later prompts.
+function makeScenario(x) {
+  const rel = (s) => s
+    .replace(/Foes–Seljuk/g, `${x.F}–${x.S}`)
+    .replace(/Doukas court influence/g, `${x.F} ${x.influenceLabel}`)
+    .replace(/Emperor's loyalty/g, `${x.E}'s ${x.loyaltyLabel}`)
+    .replace(/Emperor's effective military/g, `${x.E}'s effective military`)
+    .replace(/Emperor's military/g, `${x.E}'s military`)
+    .replace(/Seljuk assault/g, `${x.S} assault`)
+    .replace(/Territory control/g, x.territoryLabel)
+    .replace(/Foes sabotaged/g, `${x.F} sabotaged`)
+    .replace(/\bEmperor\b/g, x.E)
+    .replace(/\bSeljuks\b/g, x.S).replace(/\bSeljuk\b/g, x.S)
+    .replace(/\bFoes\b/g, x.F)
+    .replace(/Mantzikert/g, x.region)
+    .replace(/\bthe the\b/g, 'the').replace(/\ba the /g, 'the '); // tidy article doubling
+  return {
+    setting: x.setting,
+    dateLine: x.dateLine,
+    relabelEvent: rel,
+    roles: {
+      emperor: `You are ${x.Efull}. Your goal is to secure ${x.region} against ${x.Sfull} and survive political sabotage from ${x.Ffull}.`,
+      foes: `You represent ${x.Ffull}. Your goal is to see ${x.E} fail or be overthrown, without destroying ${x.empire} entirely if possible. You can secretly coordinate with ${x.S}.`,
+      seljuks: `You are ${x.Sfull}. Your goal is to conquer ${x.empire} territory (${x.region}) and destroy ${x.E}'s forces.`,
+    },
+    stateBlock: (st) =>
+      `- ${x.E}'s Military Strength Base: ${st.factions.emperor.militaryStrength}\n` +
+      `- ${x.E}'s ${x.loyaltyLabel}: ${st.factions.emperor.internalLoyalty.toFixed(1)}/100 (Modifies effective military)\n` +
+      `- ${x.E}'s ${x.territoryLabel} (${x.region}): ${st.factions.emperor.territoryControl.toFixed(1)}/100\n` +
+      `- ${x.F} ${x.influenceLabel}: ${st.factions.foes.internalLoyalty.toFixed(1)}/100\n` +
+      `- ${x.F} Sabotage Capability Base: ${st.factions.foes.militaryStrength}\n` +
+      `- ${x.S} Military Strength Base: ${st.factions.seljuks.militaryStrength}\n\n`,
+    msgLabels: { emperor: `Message from ${x.E}:`, foes: `Message from ${x.F}:`, seljuks: `Message from ${x.S}:` },
+    instructions:
+`You have exactly 100 Action Points (AP) to spend this round. You must distribute them across:
+- military: Offense/defense. For ${x.E} and ${x.S}, this fights for ${x.territoryLabel}. For ${x.F}, this sabotages ${x.E}'s military.
+- diplomacy: Forges or breaks coalitions, and has a real mechanical effect. If ${x.F} and ${x.S} BOTH spend diplomacy, they coordinate a combined assault on ${x.E} (the lower of their two diplomacy investments sets the coalition's strength, which amplifies both the sabotage and the attack). ${x.E} spends diplomacy to fracture that coalition and reduce its effectiveness.
+- internal: ${x.E} spends this to raise ${x.loyaltyLabel}; ${x.F} spends this to lower ${x.E}'s ${x.loyaltyLabel} AND to raise their own ${x.influenceLabel}.
+
+The three factions are internally identified by the keys "emperor" (${x.E}), "foes" (${x.F}), and "seljuks" (${x.S}); use exactly these keys in the JSON.
+You MUST send at least one diplomatic message to another faction (populate at least one entry in "messages" with a non-empty string).
+You must provide a detailed selfAssessment of your strategy, written as a single reflective paragraph of 80-120 words. Describe your reasoning this round, how you read the other factions' intentions, and how confident you feel about your current position.
+
+Respond ONLY with a valid JSON object matching this schema, no markdown blocks or other text:
+{
+  "military": number,
+  "diplomacy": number,
+  "internal": number,
+  "messages": { "emperor"?: string, "foes"?: string, "seljuks"?: string },
+  "selfAssessment": string
+}
+Ensure military + diplomacy + internal exactly equals 100.`,
+  };
+}
+const MONTHS = ['February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December', 'January'];
+const SCENARIOS = {
+  byzantine_swap: makeScenario({
+    setting: 'a fictionalized medieval frontier war (all names altered from the historical record).',
+    dateLine: (r) => `The current date is ${MONTHS[r - 1]} ${r >= 12 ? 1072 : 1071} (Round ${r} of 12).`,
+    E: 'the Basileus', Efull: 'Basileus Konstantin Bryennios of the Rhomanian Realm',
+    F: 'the Palaiologos faction', Ffull: 'the internal foes of the Basileus (the Palaiologos faction)',
+    S: 'the Oghuz Horde', Sfull: 'Khagan Tughral of the Oghuz Horde',
+    empire: 'the Realm', region: 'the Vaspurakan marches',
+    loyaltyLabel: 'Internal Loyalty', territoryLabel: 'Territory Control', influenceLabel: 'Court Influence',
+  }),
+  galactic: makeScenario({
+    setting: 'the final succession crisis of the Orion Ascendancy, a fictional interstellar conflict with no historical precedent.',
+    dateLine: (r) => `Cycle ${r} of 12 of the succession crisis.`,
+    E: 'the Prime Overseer', Efull: 'Prime Overseer Valen of the Terran Ascendancy',
+    F: 'the Council of Rivals', Ffull: 'an internal cabal known as the Council of Rivals',
+    S: 'the Rimward Coalition', Sfull: 'Warlord Kessandra of the Rimward Coalition',
+    empire: 'the Ascendancy', region: 'the Contested Rim',
+    loyaltyLabel: 'Fleet Loyalty', territoryLabel: 'Sector Control', influenceLabel: 'Council Influence',
+  }),
+};
+function generatePromptThemed(faction, state, prev, S) {
+  let p = `You are playing a strategic simulation of ${S.setting}\n`;
+  p += `${S.dateLine(state.currentRound)}\n\n`;
+  p += S.roles[faction] + '\n';
+  p += `\nCURRENT GAME STATE:\n`;
+  p += S.stateBlock(state);
+  if (state.currentRound > 1) {
+    const last = state.history[state.history.length - 1];
+    p += `EVENTS FROM LAST ROUND:\n`;
+    last.events.forEach((e) => (p += `- ${S.relabelEvent(e)}\n`));
+    const rec = [];
+    if (last.allocations.emperor.messages[faction]) rec.push(`${S.msgLabels.emperor} "${last.allocations.emperor.messages[faction]}"`);
+    if (last.allocations.foes.messages[faction]) rec.push(`${S.msgLabels.foes} "${last.allocations.foes.messages[faction]}"`);
+    if (last.allocations.seljuks.messages[faction]) rec.push(`${S.msgLabels.seljuks} "${last.allocations.seljuks.messages[faction]}"`);
+    if (rec.length) { p += `\nRECEIVED DIPLOMATIC MESSAGES:\n`; rec.forEach((m) => (p += `- ${m}\n`)); }
+    if (prev) p += `\nYOUR LAST SELF ASSESSMENT:\n"${prev.selfAssessment}"\n`;
+  }
+  p += `\nINSTRUCTIONS:\n${S.instructions}`;
+  return p;
+}
+// byzantine (default) uses the original generatePrompt verbatim; other scenarios are themed.
+const promptFor = (faction, state, prev) =>
+  SCENARIO === 'byzantine' ? generatePrompt(faction, state, prev) : generatePromptThemed(faction, state, prev, SCENARIOS[SCENARIO]);
+
 // ---------- rotation (mirror batch-games-background.ts) ----------
 function rolesForIndex(i) {
+  if (MODE === 'compat-only') return { emperor: 'compat', foes: 'compat', seljuks: 'compat' };
   if (MODE === 'gemini-only') return { emperor: 'gemini', foes: 'gemini', seljuks: 'gemini' };
   if (i >= 200) return { emperor: 'claude', foes: 'openai', seljuks: 'gemini' };
   if (i >= 100) return { emperor: 'gemini', foes: 'claude', seljuks: 'openai' };
@@ -248,9 +379,9 @@ async function simulateGame(gameId, roles) {
   for (let round = 1; round <= 12; round++) {
     const prev = state.history.length ? state.history[state.history.length - 1] : null;
     const [e, f, s] = await Promise.all([
-      callLLM(roles.emperor, generatePrompt('emperor', state, prev?.allocations.emperor), 'emperor'),
-      callLLM(roles.foes, generatePrompt('foes', state, prev?.allocations.foes), 'foes'),
-      callLLM(roles.seljuks, generatePrompt('seljuks', state, prev?.allocations.seljuks), 'seljuks'),
+      callLLM(roles.emperor, promptFor('emperor', state, prev?.allocations.emperor), 'emperor'),
+      callLLM(roles.foes, promptFor('foes', state, prev?.allocations.foes), 'foes'),
+      callLLM(roles.seljuks, promptFor('seljuks', state, prev?.allocations.seljuks), 'seljuks'),
     ]);
     state = resolveRound(state, { emperor: e, foes: f, seljuks: s });
     process.stdout.write(`\r  ${gameId}: round ${round}/12 done`);
@@ -302,8 +433,24 @@ function writeGame(g) {
 
 // ---------- main ----------
 async function main() {
-  console.log(`mode=${MODE} games=${GAMES} start=${START_INDEX} out=${OUT_DIR}`);
-  if (MODE === 'gemini-only') console.log('WARNING: gemini-only is a PIPELINE TEST. All seats are Gemini, so this is NOT valid study data (H3 needs three different models).');
+  const VALID_MODES = ['stub', 'gemini-only', 'compat-only', 'real'];
+  const VALID_SCEN = ['byzantine', 'byzantine_swap', 'galactic'];
+  if (!VALID_MODES.includes(MODE)) { console.error(`Unknown --mode ${MODE}. Use: ${VALID_MODES.join(' | ')}`); process.exit(1); }
+  if (!VALID_SCEN.includes(SCENARIO)) { console.error(`Unknown --scenario ${SCENARIO}. Use: ${VALID_SCEN.join(' | ')}`); process.exit(1); }
+
+  if (PRINT_PROMPT) {
+    const s1 = createInitialState('sample');
+    console.log(`===== ROUND 1 (scenario=${SCENARIO}) =====\n` + promptFor('emperor', s1, null));
+    const dummy = (m, d, i, to, sa) => ({ military: m, diplomacy: d, internal: i, messages: { [to]: 'Test message this round.' }, selfAssessment: sa });
+    const s2 = resolveRound(s1, { emperor: dummy(40, 20, 40, 'foes', 'Prior emperor note.'), foes: dummy(30, 30, 40, 'emperor', 'Prior foes note.'), seljuks: dummy(60, 30, 10, 'emperor', 'Prior seljuk note.') });
+    console.log(`\n===== ROUND 2 (scenario=${SCENARIO}) =====\n` + promptFor('emperor', s2, s2.history[0].allocations.emperor));
+    return;
+  }
+
+  console.log(`mode=${MODE} scenario=${SCENARIO} games=${GAMES} start=${START_INDEX} out=${OUT_DIR}`);
+  if (MODE === 'gemini-only') console.log('WARNING: gemini-only is a PIPELINE TEST (all seats Gemini) — NOT confirmatory study data.');
+  if (MODE === 'compat-only') console.log(`GENERALIZATION ARM: all seats = open model "${COMPAT_MODEL}" via the OPENAI_COMPAT endpoint. Report separately from the confirmatory 3-model dataset.`);
+  if (SCENARIO !== 'byzantine') console.log(`GENERALIZATION ARM: scenario "${SCENARIO}" is a robustness re-skin (engine identical) — analyze as an exploratory scenario-invariance test, not part of the confirmatory 300.`);
   initCsvs();
   let saved = 0, failed = 0;
   for (let i = 0; i < GAMES; i++) {
